@@ -1,0 +1,7 @@
+username: ""
+password: "" # Optional
+branch: "public"
+headless: false
+download:
+  "297000": # App ID
+    - "297001" # Depot ID

@@ -48,24 +48,78 @@ class DebugSymbolAnalyzer:
                     continue
                 full_path = os.path.join(root, file)
                 if self.is_binary(full_path):
-                    has_debug, details, category, score = self.analyze_file(full_path)
+                    has_debug, details, category, score, exports, arch = self.analyze_file(full_path)
                     results.append({
                         "file": full_path,
                         "filename": file,
                         "has_debug": has_debug,
                         "details": details,
                         "category": category,
-                        "score": score
+                        "score": score,
+                        "exports": exports,
+                        "exports_count": len(exports),
+                        "arch": arch
                     })
         return results
 
+    def get_arch_info(self, binary):
+        """Extract platform and architecture information."""
+        try:
+            platform = "Unknown"
+            if isinstance(binary, lief.PE.Binary): platform = "Win"
+            elif isinstance(binary, lief.ELF.Binary): platform = "Linux"
+            elif isinstance(binary, (lief.MachO.Binary, lief.MachO.FatBinary)): platform = "Mac"
+
+            bin_obj = binary
+            if isinstance(binary, lief.MachO.FatBinary):
+                bin_obj = binary.at(0)
+
+            # Use abstract layer for cross-platform arch/bits
+            header = bin_obj.abstract.header
+            
+            # Get architecture name from enum
+            arch = str(header.architecture).split('.')[-1].lower()
+            
+            # Determine bitness using built-in properties
+            bits = "64" if header.is_64 else "32"
+            
+            # Map to user-friendly names
+            arch_map = {
+                "x86_64": "x64",
+                "i386": "x86",
+                "x86": "x86",
+                "aarch64": "arm64",
+                "arm64": "arm64",
+                "arm": "arm"
+            }
+            arch = arch_map.get(arch, arch)
+            
+            return f"{platform}/{arch} ({bits}bit)"
+        except Exception as e:
+            return f"Unknown ({type(e).__name__})"
+
     def analyze_file(self, file_path):
-        # returns: has_debug (bool), details (str), category (str), score (int)
+        # returns: has_debug (bool), details (str), category (str), score (int), exports (list), arch (str)
         # Categories: FULL, PARTIAL, MISSING, STRIPPED, ERROR
+        arch = "Unknown"
+        def result(has_debug, details, category, score, exports):
+            return has_debug, details, category, score, exports, arch
+
         try:
             binary = lief.parse(file_path)
             if binary is None:
-                return False, "Parse failed", "ERROR", 0
+                return result(False, "Parse failed", "ERROR", 0, [])
+
+            arch = self.get_arch_info(binary)
+
+            exports = []
+            try:
+                if isinstance(binary, lief.MachO.FatBinary):
+                    exports = [s.name for s in binary.at(0).exported_symbols]
+                else:
+                    exports = [s.name for s in binary.exported_symbols]
+            except:
+                pass
 
             # --- WINDOWS (PE) ---
             if isinstance(binary, lief.PE.Binary):
@@ -80,21 +134,21 @@ class DebugSymbolAnalyzer:
                         if pdb_path:
                             name = pdb_path.split('\\')[-1].split('/')[-1]
                             if name.lower() in self.available_pdbs:
-                                return True, f"Found matching PDB: {name}", "FULL", 100
+                                return result(True, f"Found matching PDB: {name}", "FULL", 100, exports)
                             else:
-                                return False, f"Missing expected PDB: {name}", "MISSING", 40
+                                return result(False, f"Missing expected PDB: {name}", "MISSING", 40, exports)
 
-                return False, "No PDB linked", "STRIPPED", 0
+                return result(False, "No PDB linked", "STRIPPED", 0, exports)
 
             # --- LINUX (ELF) ---
             elif isinstance(binary, lief.ELF.Binary):
                 if binary.has_section(".debug_info"):
-                    return True, "Unstripped (DWARF embedded)", "FULL", 100
+                    return result(True, "Unstripped (DWARF embedded)", "FULL", 100, exports)
                 if binary.has_section(".symtab"):
-                    return True, "Unstripped (Symtab embedded)", "PARTIAL", 80
+                    return result(True, "Unstripped (Symtab embedded)", "PARTIAL", 80, exports)
                 if binary.has_section(".gnu_debuglink"):
-                    return False, "Separate .debug file linked (Missing)", "MISSING", 40
-                return False, "Fully stripped", "STRIPPED", 0
+                    return result(False, "Separate .debug file linked (Missing)", "MISSING", 40, exports)
+                return result(False, "Fully stripped", "STRIPPED", 0, exports)
 
             # --- MACOS (Mach-O) ---
             elif isinstance(binary, (lief.MachO.Binary, lief.MachO.FatBinary)):
@@ -104,33 +158,34 @@ class DebugSymbolAnalyzer:
                     uuid_str = bytes(bin_obj.uuid.uuid).hex()[:8] + "..."
 
                 if bin_obj.has_section("__debug_info"):
-                    return True, f"Unstripped (DWARF) UUID: {uuid_str}", "FULL", 100
+                    return result(True, f"Unstripped (DWARF) UUID: {uuid_str}", "FULL", 100, exports)
 
                 if bin_obj.has_symbol_command:
                     local_syms = [s for s in bin_obj.symbols if not getattr(s, 'is_external', False)]
                     if len(local_syms) > 50:
-                        return True, f"Unstripped (Symtab) UUID: {uuid_str}", "PARTIAL", 80
+                        return result(True, f"Unstripped (Symtab) UUID: {uuid_str}", "PARTIAL", 80, exports)
 
-                return False, f"Stripped (dSYM UUID: {uuid_str})", "STRIPPED", 0
+                return result(False, f"Stripped (dSYM UUID: {uuid_str})", "STRIPPED", 0, exports)
 
-            return False, "Unsupported format", "ERROR", 0
+            return result(False, "Unsupported format", "ERROR", 0, [])
 
         except Exception as e:
-            return False, f"Error: {type(e).__name__}", "ERROR", 0
+            return result(False, f"Error: {type(e).__name__}", "ERROR", 0, [])
 
 
 def print_table(title, items, dir_path):
     if not items:
         return
     print(f"\n=== {title} ({len(items)}) ===")
-    header = f"{'DETAILS':<40} | {'FILE'}"
+    header = f"{'ARCH':<18} | {'DETAILS':<40} | {'EXPORTS':<10} | {'FILE'}"
     print(header)
-    print("-" * 100)
+    print("-" * 140)
     # Sort items by score descending, then filename
     items.sort(key=lambda x: (-x['score'], x['filename']))
     for res in items:
         rel_path = os.path.relpath(res['file'], dir_path)
-        print(f"{res['details']:<40} | {rel_path}")
+        exports_str = str(res['exports_count']) if res['exports_count'] > 0 else "-"
+        print(f"{res.get('arch', 'Unknown'):<18} | {res['details']:<40} | {exports_str:<10} | {rel_path}")
 
 
 def main():
@@ -188,7 +243,13 @@ def main():
         
         for res in results:
             rel_path = os.path.relpath(res['file'], args.dir)
-            line = f"{res['category']:<10} | {res['details']:<40} | {rel_path}\n"
+            exports_info = f"Exports: {res['exports_count']}"
+            if 0 < res['exports_count'] <= 10:
+                exports_info += f" ({', '.join(res['exports'])})"
+            elif res['exports_count'] > 10:
+                exports_info += f" ({', '.join(res['exports'][:5])}...)"
+            
+            line = f"{res['category']:<10} | {res.get('arch', 'Unknown'):<18} | {res['details']:<40} | {exports_info:<50} | {rel_path}\n"
             
             if res['category'] == 'ERROR':
                 f_err.write(line)

@@ -27,7 +27,11 @@ https://github.com/bukforks/symwalker/releases/tag/v2.0.0-test4
 cargo install --git https://github.com/19h/symwalker
 ```
 
-Install DepotDownloader: `winget install --exact --id SteamRE.DepotDownloader`
+### Installing DepotDownloader
+
+```bash
+winget install --exact --id SteamRE.DepotDownloader
+```
 
 ## Setup
 
@@ -39,8 +43,11 @@ uv sync
 uv run playwright install chromium
 ```
 
-Verify DepotDownloader: `DepotDownloader --help`
-Verify symwalker: `symwalker --version`
+Verify installation:
+```bash
+DepotDownloader --help
+symwalker --version
+```
 
 ## Config
 

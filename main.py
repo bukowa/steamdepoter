@@ -132,19 +132,26 @@ def detect_format(path):
 def run_symwalker(directory):
     try:
         result = subprocess.run(
-            ['symwalker', directory, '--show-stripped', '--check-remote', '--security', '--check-dsym', '--verbose', '--json'],
+            ['symwalker', directory, '--show-stripped', '--check-remote', '--security', '--json'],
             capture_output=True, text=True, timeout=600
         )
         if result.returncode == 0:
             return json.loads(result.stdout)
-        else:
-            logger.warning(f"symwalker failed: {result.stderr}")
-    except subprocess.TimeoutExpired:
-        logger.error("symwalker timed out")
-    except json.JSONDecodeError as e:
-        logger.error(f"symwalker JSON parse error: {e}")
     except Exception as e:
-        logger.error(f"symwalker error: {e}")
+        logger.warning(f"symwalker error: {e}")
+    return []
+
+def run_pdbwalker(directory):
+    try:
+        result = subprocess.run(
+            ['pdbwalker', directory, '--check-remote', '--json'],
+            capture_output=True, text=True, timeout=600
+        )
+        if result.returncode == 0:
+            lines = [l for l in result.stdout.strip().split('\n') if l.strip()]
+            return [json.loads(l) for l in lines]
+    except Exception as e:
+        logger.warning(f"pdbwalker error: {e}")
     return []
 
 
@@ -164,13 +171,18 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     logger.info(f"Scanning: {scan_dir}")
     if ign: logger.info(f"Ignoring: {len(ign)} patterns")
     
-    logger.info("Running symwalker...")
-    symwalker_results = run_symwalker(scan_dir)
+    all_results = []
+    
+    logger.info("Running symwalker (ELF/Mach-O)...")
+    all_results.extend(run_symwalker(scan_dir))
+    
+    logger.info("Running pdbwalker (PE)...")
+    all_results.extend(run_pdbwalker(scan_dir))
     
     dirs = defaultdict(list)
     total = 0
-    for entry in symwalker_results:
-        fp = entry['file_path']
+    for entry in all_results:
+        fp = entry.get('file_path', '')
         if ignore_path(fp, ign): continue
         parent = os.path.dirname(fp)
         dirs[os.path.relpath(parent, scan_dir)].append(entry)
@@ -180,7 +192,10 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     
     result = {}
     for dp, files in dirs.items():
-        files.sort(key=lambda x: (-int(x.get('has_debug_info', False)), x.get('file_path', '')))
+        files.sort(key=lambda x: (
+            -int(has_debug(x)),
+            x.get('file_path', '')
+        ))
         result[dp] = {'total': len(files), 'files': files}
     
     out = {'scan_time': datetime.now().isoformat(), 'total_files': total, 'total_directories': len(result), 'directories': result}
@@ -189,8 +204,13 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     
     generate_html(output)
     
-    dc = sum(1 for d in result.values() for f in d['files'] if f.get('has_debug_info'))
+    dc = sum(1 for d in result.values() for f in d['files'] if f.get('has_debug_info') or f.get('local_pdb', {}).get('available') or f.get('remote_pdb', {}).get('available'))
     logger.info(f"With debug info: {dc}")
+
+def has_debug(f):
+    return (f.get('has_debug_info') == True or 
+            f.get('local_pdb', {}).get('available') == True or 
+            f.get('remote_pdb', {}).get('available') == True)
 
 def generate_html(json_path):
     html_path = json_path.replace('.json', '.html')
@@ -203,7 +223,7 @@ def generate_html(json_path):
             f['_folder'] = folder
             all_files.append(f)
     
-    all_files.sort(key=lambda x: (-int(x.get('has_debug_info', False)), -int(x.get('is_executable', False)), x.get('file_path', '')))
+    all_files.sort(key=lambda x: (-int(has_debug(x)), x.get('file_path', '')))
     
     all_keys = set()
     for f in all_files:
@@ -223,7 +243,7 @@ def generate_html(json_path):
         for k in all_keys:
             v = f.get(k)
             cells.append(f'<td>{flag(v, k)}</td>')
-        rows += f'<tr class="{"has-debug" if f.get("has_debug_info") else "no-debug"}">{"".join(cells)}</tr>'
+        rows += f'<tr class="{"has-debug" if has_debug(f) else "no-debug"}">{"".join(cells)}</tr>'
     
     html = f'''<!DOCTYPE html>
 <html>

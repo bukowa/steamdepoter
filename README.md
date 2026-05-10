@@ -11,7 +11,7 @@ Download Steam game depots and analyze binaries for debug symbols.
 ### Installing symwalker
 
 **Option 1:** Download pre-built binary from my fork:
-https://github.com/bukforks/symwalker/releases/tag/untagged-932c2d61438bee04a2e8
+https://github.com/bukforks/symwalker/releases/tag/v2.0.0-test4
 
 **Option 2:** Build from source:
 ```bash

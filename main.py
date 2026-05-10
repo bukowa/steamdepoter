@@ -284,10 +284,118 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     open(output, 'w', encoding='utf-8').write(json.dumps(out, indent=2))
     logger.info(f"Results: {output}")
     
+    generate_html(output)
+    
     dc = sum(1 for d in result.values() for f in d['files'] if f['debug'])
     sc = sum(1 for d in result.values() for f in d['files'] if f['symtab'])
     ec = sum(1 for d in result.values() for f in d['files'] if f['exports'])
     logger.info(f"Debug: {dc}, Symtab: {sc}, Exports: {ec}")
+
+def generate_html(json_path):
+    html_path = json_path.replace('.json', '.html')
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    folders = sorted(data['directories'].keys())
+    all_files = []
+    for folder, info in data['directories'].items():
+        for f in info['files']:
+            f['_folder'] = folder
+            all_files.append(f)
+    
+    all_files.sort(key=lambda x: (-int(x['debug']), -int(x['symtab']), -x['exports_count']))
+    
+    rows = ''
+    for f in all_files:
+        debug_color = '#4caf50' if f['debug'] else '#666'
+        debug_label = f['debug_type'].upper() if f['debug_type'] else '-'
+        sym = '✓' if f['symtab'] else '-'
+        exp = f['exports_count'] if f['exports_count'] else '-'
+        rows += f'''<tr>
+            <td>{f['file']}</td>
+            <td>{f['arch']}</td>
+            <td style="color:{debug_color};font-weight:bold">{debug_label}</td>
+            <td>{sym}</td>
+            <td>{exp}</td>
+            <td style="color:#888;font-size:85%">{f['_folder']}</td>
+        </tr>'''
+    
+    html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Steam Depot Analysis</title>
+    <style>
+        body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin: 20px; background: #1a1a1a; color: #eee; }}
+        h1 {{ color: #fff; }}
+        .controls {{ margin: 15px 0; }}
+        select {{ padding: 8px; background: #333; color: #fff; border: 1px solid #555; border-radius: 4px; }}
+        table {{ border-collapse: collapse; width: 100%; background: #252525; }}
+        th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #333; }}
+        th {{ background: #333; cursor: pointer; user-select: none; }}
+        th:hover {{ background: #444; }}
+        tr:hover {{ background: #2a2a2a; }}
+        .stats {{ margin: 20px 0; color: #888; }}
+    </style>
+</head>
+<body>
+    <h1>Steam Depot Analysis</h1>
+    <div class="stats">
+        {data['total_files']} binaries in {data['total_directories']} folders | 
+        Scanned: {data['scan_time']}
+    </div>
+    <div class="controls">
+        <label>Folder: </label>
+        <select id="folderFilter" onchange="filterFolder()">
+            <option value="">All</option>
+            {"".join(f'<option value="{f}">{f}</option>' for f in folders)}
+        </select>
+    </div>
+    <table id="table">
+        <thead>
+            <tr>
+                <th onclick="sort(0)">File</th>
+                <th onclick="sort(1)">Arch</th>
+                <th onclick="sort(2)">Debug</th>
+                <th onclick="sort(3)">Sym</th>
+                <th onclick="sort(4)">Exp</th>
+                <th onclick="sort(5)">Folder</th>
+            </tr>
+        </thead>
+        <tbody id="tbody">{rows}</tbody>
+    </table>
+    <script>
+        let asc = true;
+        function sort(col) {{
+            const tbody = document.getElementById('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const idx = col === 0 ? 0 : col === 1 ? 1 : col === 2 ? 2 : col === 3 ? 3 : col === 4 ? 4 : 5;
+            rows.sort((a, b) => {{
+                const A = a.cells[idx].textContent.trim().toLowerCase();
+                const B = b.cells[idx].textContent.trim().toLowerCase();
+                if (col === 2) {{
+                    const order = {{'dwarf':3, 'pdb':2, 'stripped':0}};
+                    const va = order[a.cells[2].textContent.toLowerCase()] ?? 0;
+                    const vb = order[b.cells[2].textContent.toLowerCase()] ?? 0;
+                    return asc ? vb - va : va - vb;
+                }}
+                if (col === 3) {{ return asc ? (a.cells[3].textContent === '✓' ? 1 : 0) - (b.cells[3].textContent === '✓' ? 1 : 0) : (b.cells[3].textContent === '✓' ? 1 : 0) - (a.cells[3].textContent === '✓' ? 1 : 0); }}
+                if (col === 4) {{ return asc ? parseInt(b.cells[4].textContent) - parseInt(a.cells[4].textContent) : parseInt(a.cells[4].textContent) - parseInt(b.cells[4].textContent); }}
+                return asc ? A.localeCompare(B) : B.localeCompare(A);
+            }});
+            rows.forEach(r => tbody.appendChild(r));
+            asc = !asc;
+        }}
+        function filterFolder() {{
+            const f = document.getElementById('folderFilter').value;
+            document.querySelectorAll('#tbody tr').forEach(r => r.style.display = f && !r.cells[5].textContent.includes(f) ? 'none' : '');
+        }}
+    </script>
+</body>
+</html>'''
+    
+    open(html_path, 'w', encoding='utf-8').write(html)
+    logger.info(f"HTML: {html_path}")
 
 
 def main():
@@ -300,7 +408,12 @@ def main():
     parser.add_argument("--branch", default="public", help="Branch name")
     parser.add_argument("--headless", action="store_true", help="Headless browser")
     parser.add_argument("--mode", choices=["scrape", "download", "analyze", "all"], default="all", help="Mode")
+    parser.add_argument("--html", action="store_true", help="Generate HTML from existing JSON")
     args = parser.parse_args()
+    
+    if args.html:
+        generate_html("analysis_results.json")
+        return
     
     import yaml
     

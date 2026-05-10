@@ -4,3 +4,4 @@ manifest_downloads/**
 config.backup.yaml
 __pycache__
 analysis_results.json
+analysis_results.html

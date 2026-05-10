@@ -53,6 +53,8 @@ uv run main.py --mode analyze
 
 Results in `analysis_results.json` - debug/symbol info for each binary.
 
+HTML report: `analysis_results.html` - sortable table with folder filter.
+
 ## Ignore Files
 
 Optional: create `ignore.txt` with patterns to skip (one per line, `#` for comments).

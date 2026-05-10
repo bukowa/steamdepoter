@@ -14,7 +14,6 @@ Scrapes SteamDB for depot manifests, downloads game files, and analyzes binaries
 ## Requirements
 
 - Python 3.14+
-- [.NET SDK](https://dotnet.microsoft.com/download) for DepotDownloader
 - [symwalker](https://github.com/19h/symwalker)
 
 ### Installing symwalker

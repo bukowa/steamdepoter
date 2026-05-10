@@ -9,12 +9,14 @@ Scrapes SteamDB for depot manifests, downloads game files, and analyzes binaries
 - Fetch depot manifests from SteamDB
 - Download depot files via DepotDownloader
 - Analyze ELF/Mach-O binaries with symwalker
+- Analyze PE binaries with pdbwalker
 - Interactive HTML report
 
 ## Requirements
 
 - Python 3.14+
-- [symwalker](https://github.com/19h/symwalker)
+- [symwalker](https://github.com/19h/symwalker) for ELF/Mach-O analysis
+- [pdbwalker](https://github.com/19h/pdbwalker) for PE analysis
 
 ### Installing symwalker
 
@@ -24,6 +26,16 @@ https://github.com/bukforks/symwalker/releases/tag/v2.0.0-test4
 **Option 2:** Build from source:
 ```bash
 cargo install --git https://github.com/19h/symwalker
+```
+
+### Installing pdbwalker
+
+**Option 1:** Download pre-built binary from my fork:
+https://github.com/bukforks/pdbwalker/releases/tag/v1.0.0
+
+**Option 2:** Build from source:
+```bash
+cargo install --git https://github.com/19h/pdbwalker
 ```
 
 ### Installing DepotDownloader
@@ -92,13 +104,20 @@ uv run main.py --html
 - Orange rows = no debug info (stripped)
 - Shows: architecture, binary type, security flags (NX, RELRO, canary, etc.)
 
-### symwalker provides
+### symwalker provides (ELF/Mach-O)
 
 - DWARF debug sections detection
 - Build ID extraction
 - dSYM bundle detection (macOS)
 - debuginfod remote symbol lookup
 - Security analysis (PIE, NX, RELRO, stack canary, FORTIFY)
+
+### pdbwalker provides (PE)
+
+- PDB debug info detection
+- Local PDB file detection
+- Microsoft Symbol Server lookup
+- PE metadata (architecture, image base, subsystem)
 
 ## Ignore Files
 

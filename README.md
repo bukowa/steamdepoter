@@ -6,9 +6,17 @@ Download Steam game depots and analyze binaries for debug symbols.
 
 - Python 3.14+
 - [.NET SDK](https://dotnet.microsoft.com/download) (for DepotDownloader)
-- [symwalker](https://github.com/19h/symwalker) (in PATH)
+- [symwalker](https://github.com/19h/symwalker) (in PATH) - **required**
 
-Install symwalker: `cargo install symwalker` or download from releases.
+### Installing symwalker
+
+**Option 1:** Download pre-built binary from my fork:
+https://github.com/bukforks/symwalker/releases/tag/untagged-932c2d61438bee04a2e8
+
+**Option 2:** Build from source:
+```bash
+cargo install --git https://github.com/19h/symwalker
+```
 
 Install DepotDownloader: `winget install --exact --id SteamRE.DepotDownloader`
 

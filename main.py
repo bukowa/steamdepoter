@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, subprocess, argparse, logging
+import os, sys, json, subprocess, argparse, logging, time
 from datetime import datetime
 from collections import defaultdict
 
@@ -18,10 +18,11 @@ class SteamDBScraper:
     def __init__(self, headless=False):
         self.headless = headless
         from playwright.sync_api import sync_playwright
+        from bs4 import BeautifulSoup
         self.sync_playwright = sync_playwright
+        self.BeautifulSoup = BeautifulSoup
 
     def fetch_manifests(self, depot_id):
-        from bs4 import BeautifulSoup
         url = f"https://steamdb.info/depot/{depot_id}/manifests/"
         
         with self.sync_playwright() as p:
@@ -47,7 +48,7 @@ class SteamDBScraper:
             return self._parse_html(html_content)
             
     def _parse_html(self, html):
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = self.BeautifulSoup(html, 'html.parser')
         manifests = []
         
         for row in soup.find_all('tr'):
@@ -131,7 +132,7 @@ def detect_format(path):
 def run_symwalker(directory):
     try:
         result = subprocess.run(
-            ['symwalker', directory, '--show-stripped', '--check-remote', '--security', '--json'],
+            ['symwalker', directory, '--show-stripped', '--check-remote', '--security', '--check-dsym', '--verbose', '--json'],
             capture_output=True, text=True, timeout=600
         )
         if result.returncode == 0:

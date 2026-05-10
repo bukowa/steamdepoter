@@ -1,269 +1,169 @@
-import os
-import lief
+#!/usr/bin/env python3
+import os, sys, json, struct, argparse
+from datetime import datetime
+from collections import defaultdict
 
-# Disable LIEF's internal C++ logging to keep the console clean
-lief.logging.disable()
+try:
+    import lief
+    lief.logging.disable()
+except ImportError:
+    print("ERROR: LIEF not installed. Run: pip install lief")
+    sys.exit(1)
 
-class DebugSymbolAnalyzer:
-    def __init__(self, ignore_list=None):
-        self.available_pdbs = set()
-        self.ignore_list = ignore_list or []
+MAGIC_BYTES = {
+    b'MZ': 'PE', b'\x7fELF': 'ELF',
+    b'\xfe\xed\xfa\xce': 'MachO32', b'\xce\xfa\xed\xfe': 'MachO32RE',
+    b'\xfe\xed\xfa\xcf': 'MachO64', b'\xcf\xfa\xed\xfe': 'MachO64RE',
+    b'\xca\xfe\xba\xbe': 'FatBinary', b'\xbe\xba\xfe\xca': 'FatBinaryRE',
+}
 
-    def is_binary(self, file_path):
-        """Quick check for magic bytes to avoid parsing non-executables."""
-        try:
-            with open(file_path, 'rb') as f:
-                header = f.read(4)
-            if header.startswith(b'MZ'): return True  # Windows
-            if header.startswith(b'\x7fELF'): return True  # Linux
-            macho_magics = (
-                b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe',
-                b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe',
-                b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'
-            )
-            return header in macho_magics  # Mac
-        except:
-            return False
+def detect_format(path):
+    try:
+        with open(path, 'rb') as f:
+            h = f.read(4)
+        for m, fmt in MAGIC_BYTES.items():
+            if h.startswith(m): return fmt
+    except: pass
+    return None
 
-    def analyze_directory(self, directory_path):
-        results = []
-        
-        # Pre-scan for all available PDB files in the directory
-        self.available_pdbs.clear()
-        for root, dirs, files in os.walk(directory_path):
-            # Skip ignored directories during pre-scan too
-            dirs[:] = [d for d in dirs if d not in self.ignore_list]
-            for file in files:
-                if file in self.ignore_list:
-                    continue
-                if file.lower().endswith(".pdb"):
-                    self.available_pdbs.add(file.lower())
+def parse_rich_header(data):
+    try:
+        i = data.find(b'Rich')
+        if i == -1: return None
+        key = struct.unpack('<I', data[i+4:i+8])[0]
+        dans = 0x536e6144 ^ key
+        di = data.find(struct.pack('<I', dans))
+        if di == -1: return None
+        recs = []
+        for j in range(di+16, i, 8):
+            if j+8 > i: break
+            v1 = struct.unpack('<I', data[j:j+4])[0] ^ key
+            v2 = struct.unpack('<I', data[j+4:j+8])[0] ^ key
+            recs.append({'prod_id': v1>>16, 'build': v1&0xFFFF, 'count': v2})
+        return {'xor_key': hex(key), 'records': recs[:5]}
+    except: return None
 
-        for root, dirs, files in os.walk(directory_path):
-            # Skip ignored directories
-            dirs[:] = [d for d in dirs if d not in self.ignore_list]
-            
-            for file in files:
-                if file in self.ignore_list:
-                    continue
-                full_path = os.path.join(root, file)
-                if self.is_binary(full_path):
-                    has_debug, details, category, score, exports, arch = self.analyze_file(full_path)
-                    results.append({
-                        "file": full_path,
-                        "filename": file,
-                        "has_debug": has_debug,
-                        "details": details,
-                        "category": category,
-                        "score": score,
-                        "exports": exports,
-                        "exports_count": len(exports),
-                        "arch": arch
-                    })
-        return results
+def get_arch(bin):
+    try:
+        if isinstance(bin, lief.PE.Binary): p = "Win"
+        elif isinstance(bin, lief.ELF.Binary): p = "Linux"
+        elif isinstance(bin, (lief.MachO.Binary, lief.MachO.FatBinary)): p = "Mac"
+        else: return "Unknown"
+        obj = bin.at(0) if isinstance(bin, lief.MachO.FatBinary) else bin
+        h = obj.abstract.header
+        a = str(h.architecture).split('.')[-1].lower()
+        b = "64" if h.is_64 else "32"
+        am = {"x86_64": "x64", "i386": "x86", "x86": "x86", "aarch64": "arm64", "arm64": "arm64", "arm": "arm"}
+        return f"{p}/{am.get(a,a)} ({b}bit)"
+    except Exception as e: return f"Error: {type(e).__name__}"
 
-    def get_arch_info(self, binary):
-        """Extract platform and architecture information."""
-        try:
-            platform = "Unknown"
-            if isinstance(binary, lief.PE.Binary): platform = "Win"
-            elif isinstance(binary, lief.ELF.Binary): platform = "Linux"
-            elif isinstance(binary, (lief.MachO.Binary, lief.MachO.FatBinary)): platform = "Mac"
+def analyze_pe(bin, data):
+    r = {'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
+    rich = parse_rich_header(data)
+    if rich: r['extra']['rich_header'] = rich
+    for dbg in bin.debug:
+        if dbg.type == lief.PE.Debug.TYPES.CODEVIEW:
+            cv = dbg.code_view if hasattr(dbg, 'code_view') else None
+            if cv and cv.filename:
+                r['debug'] = True
+                r['debug_type'] = 'pdb'
+                r['debug_detail'] = cv.filename.split('\\')[-1].split('/')[-1]
+                return r
+    return r
 
-            bin_obj = binary
-            if isinstance(binary, lief.MachO.FatBinary):
-                bin_obj = binary.at(0)
+def analyze_elf(bin):
+    r = {'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
+    try:
+        for n in bin.notes:
+            if n.name == "GNU" and "BUILD" in str(n.type).upper():
+                r['extra']['build_id'] = bytes(n.description).hex()
+                break
+    except: pass
+    if bin.has_section(".debug_info"):
+        r['debug'] = True
+        r['debug_type'] = 'dwarf'
+        r['debug_detail'] = '.debug_info present'
+    if bin.has_section(".symtab"): r['symtab'] = True
+    try:
+        ds = list(bin.dynamic_symbols)
+        if ds: r['exports'], r['exports_count'] = True, len(ds)
+    except: pass
+    return r
 
-            # Use abstract layer for cross-platform arch/bits
-            header = bin_obj.abstract.header
-            
-            # Get architecture name from enum
-            arch = str(header.architecture).split('.')[-1].lower()
-            
-            # Determine bitness using built-in properties
-            bits = "64" if header.is_64 else "32"
-            
-            # Map to user-friendly names
-            arch_map = {
-                "x86_64": "x64",
-                "i386": "x86",
-                "x86": "x86",
-                "aarch64": "arm64",
-                "arm64": "arm64",
-                "arm": "arm"
-            }
-            arch = arch_map.get(arch, arch)
-            
-            return f"{platform}/{arch} ({bits}bit)"
-        except Exception as e:
-            return f"Unknown ({type(e).__name__})"
+def analyze_macho(bin):
+    r = {'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
+    obj = bin.at(0) if isinstance(bin, lief.MachO.FatBinary) else bin
+    if obj.has_uuid: r['extra']['uuid'] = bytes(obj.uuid.uuid).hex()
+    if obj.has_section("__debug_info"):
+        r['debug'] = True
+        r['debug_type'] = 'dwarf'
+        r['debug_detail'] = '__debug_info present'
+    if obj.has_symbol_command: r['symtab'] = True
+    try:
+        ex = list(bin.exported_functions) if isinstance(bin, lief.MachO.FatBinary) else list(obj.exported_functions)
+        if ex: r['exports'], r['exports_count'] = True, len(ex)
+    except: pass
+    return r
 
-    def analyze_file(self, file_path):
-        # returns: has_debug (bool), details (str), category (str), score (int), exports (list), arch (str)
-        # Categories: FULL, PARTIAL, MISSING, STRIPPED, ERROR
-        arch = "Unknown"
-        def result(has_debug, details, category, score, exports):
-            return has_debug, details, category, score, exports, arch
+def analyze_file(path):
+    res = {'file': os.path.basename(path), 'path': path, 'arch': 'Unknown', 'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
+    try:
+        with open(path, 'rb') as f: data = f.read()
+        bin = lief.parse(list(data))
+        if not bin: res['arch'] = 'Parse failed'; return res
+    except Exception as e:
+        res['arch'] = f'Error: read/parse - {type(e).__name__}'
+        return res
+    try:
+        res['arch'] = get_arch(bin)
+    except Exception as e:
+        res['arch'] = f'Error: arch - {type(e).__name__}'
+    try:
+        if isinstance(bin, lief.PE.Binary): res.update(analyze_pe(bin, data))
+        elif isinstance(bin, lief.ELF.Binary): res.update(analyze_elf(bin))
+        elif isinstance(bin, (lief.MachO.Binary, lief.MachO.FatBinary)): res.update(analyze_macho(bin))
+    except Exception as e:
+        res['extra']['analyze_error'] = f'{type(e).__name__}: {e}'
+    return res
 
-        try:
-            binary = lief.parse(file_path)
-            if binary is None:
-                return result(False, "Parse failed", "ERROR", 0, [])
-
-            arch = self.get_arch_info(binary)
-
-            exports = []
-            try:
-                if isinstance(binary, lief.MachO.FatBinary):
-                    exports = [s.name for s in binary.at(0).exported_symbols]
-                else:
-                    exports = [s.name for s in binary.exported_symbols]
-            except:
-                pass
-
-            # --- WINDOWS (PE) ---
-            if isinstance(binary, lief.PE.Binary):
-                for dbg in binary.debug:
-                    if dbg.type == lief.PE.Debug.TYPES.CODEVIEW:
-                        pdb_path = ""
-                        if hasattr(dbg, "filename"):
-                            pdb_path = dbg.filename
-                        elif hasattr(dbg, "code_view") and hasattr(dbg.code_view, "filename"):
-                            pdb_path = dbg.code_view.filename
-
-                        if pdb_path:
-                            name = pdb_path.split('\\')[-1].split('/')[-1]
-                            if name.lower() in self.available_pdbs:
-                                return result(True, f"Found matching PDB: {name}", "FULL", 100, exports)
-                            else:
-                                return result(False, f"Missing expected PDB: {name}", "MISSING", 40, exports)
-
-                return result(False, "No PDB linked", "STRIPPED", 0, exports)
-
-            # --- LINUX (ELF) ---
-            elif isinstance(binary, lief.ELF.Binary):
-                if binary.has_section(".debug_info"):
-                    return result(True, "Unstripped (DWARF embedded)", "FULL", 100, exports)
-                if binary.has_section(".symtab"):
-                    return result(True, "Unstripped (Symtab embedded)", "PARTIAL", 80, exports)
-                if binary.has_section(".gnu_debuglink"):
-                    return result(False, "Separate .debug file linked (Missing)", "MISSING", 40, exports)
-                return result(False, "Fully stripped", "STRIPPED", 0, exports)
-
-            # --- MACOS (Mach-O) ---
-            elif isinstance(binary, (lief.MachO.Binary, lief.MachO.FatBinary)):
-                bin_obj = binary.at(0) if isinstance(binary, lief.MachO.FatBinary) else binary
-                uuid_str = "None"
-                if bin_obj.has_uuid:
-                    uuid_str = bytes(bin_obj.uuid.uuid).hex()[:8] + "..."
-
-                if bin_obj.has_section("__debug_info"):
-                    return result(True, f"Unstripped (DWARF) UUID: {uuid_str}", "FULL", 100, exports)
-
-                if bin_obj.has_symbol_command:
-                    local_syms = [s for s in bin_obj.symbols if not getattr(s, 'is_external', False)]
-                    if len(local_syms) > 50:
-                        return result(True, f"Unstripped (Symtab) UUID: {uuid_str}", "PARTIAL", 80, exports)
-
-                return result(False, f"Stripped (dSYM UUID: {uuid_str})", "STRIPPED", 0, exports)
-
-            return result(False, "Unsupported format", "ERROR", 0, [])
-
-        except Exception as e:
-            return result(False, f"Error: {type(e).__name__}", "ERROR", 0, [])
-
-
-def print_table(title, items, dir_path):
-    if not items:
-        return
-    print(f"\n=== {title} ({len(items)}) ===")
-    header = f"{'ARCH':<18} | {'DETAILS':<40} | {'EXPORTS':<10} | {'FILE'}"
-    print(header)
-    print("-" * 140)
-    # Sort items by score descending, then filename
-    items.sort(key=lambda x: (-x['score'], x['filename']))
-    for res in items:
-        rel_path = os.path.relpath(res['file'], dir_path)
-        exports_str = str(res['exports_count']) if res['exports_count'] > 0 else "-"
-        print(f"{res.get('arch', 'Unknown'):<18} | {res['details']:<40} | {exports_str:<10} | {rel_path}")
-
+def ignore(path, lst):
+    pl = path.lower()
+    return any(p.lower() in pl for p in lst)
 
 def main():
-    import argparse, sys
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--dir', default='manifest_downloads')
+    ap.add_argument('--output', default='analysis_results.json')
+    ap.add_argument('--ignore', default='ignore.txt')
+    a = ap.parse_args()
+    if not os.path.isdir(a.dir): print(f"ERROR: {a.dir} not found"); sys.exit(1)
+    ign = []
+    if os.path.isfile(a.ignore):
+        ign = [l.strip() for l in open(a.ignore, encoding='utf-8') if l.strip() and not l.startswith('#')]
+    print(f"Scanning: {a.dir}")
+    if ign: print(f"Ignoring: {len(ign)} patterns")
+    dirs = defaultdict(list)
+    total = 0
+    for root, ds, fs in os.walk(a.dir):
+        ds[:] = [d for d in ds if not ignore(os.path.join(root, d), ign)]
+        for f in fs:
+            fp = os.path.join(root, f)
+            if ignore(fp, ign): continue
+            if detect_format(fp):
+                dirs[os.path.relpath(root, a.dir)].append(fp)
+                total += 1
+    print(f"Found {total} binaries in {len(dirs)} dirs")
+    result = {}
+    for dp, fls in dirs.items():
+        res = [analyze_file(p) for p in fls]
+        res.sort(key=lambda x: (-int(x['debug']), -int(x['symtab']), -x['exports_count']))
+        result[dp] = {'total': len(res), 'files': res}
+    out = {'scan_time': datetime.now().isoformat(), 'total_files': total, 'total_directories': len(result), 'directories': result}
+    open(a.output, 'w', encoding='utf-8').write(json.dumps(out, indent=2))
+    print(f"Results: {a.output}")
+    dc = sum(1 for d in result.values() for f in d['files'] if f['debug'])
+    sc = sum(1 for d in result.values() for f in d['files'] if f['symtab'])
+    ec = sum(1 for d in result.values() for f in d['files'] if f['exports'])
+    print(f"Debug: {dc}, Symtab: {sc}, Exports: {ec}")
 
-    parser = argparse.ArgumentParser(description="Triage Steam binaries for symbols")
-    parser.add_argument("--dir", default="manifest_downloads", help="Directory to scan")
-    parser.add_argument("--ignore", default="ignore.txt", help="File containing list of directories/files to ignore")
-    args = parser.parse_args()
-
-    if not os.path.exists(args.dir):
-        print(f"Error: Directory '{args.dir}' not found.")
-        return
-
-    ignore_list = []
-    if os.path.exists(args.ignore):
-        with open(args.ignore, "r", encoding="utf-8") as f:
-            ignore_list = [line.strip() for line in f if line.strip()]
-
-    print(f"Scanning: {args.dir}")
-    if ignore_list:
-        print(f"Ignoring: {', '.join(ignore_list)}")
-    print("")
-
-    analyzer = DebugSymbolAnalyzer(ignore_list=ignore_list)
-    results = analyzer.analyze_directory(args.dir)
-
-    # Sort results for display and logs: 
-    # 1. By score descending (FULL > PARTIAL > MISSING > STRIPPED)
-    # 2. By filename (ignoring the manifest ID in the path)
-    results.sort(key=lambda x: (-x['score'], x['filename']))
-
-    # Group results
-    full_syms = [r for r in results if r['category'] == 'FULL']
-    partial_syms = [r for r in results if r['category'] == 'PARTIAL']
-    missing_syms = [r for r in results if r['category'] == 'MISSING']
-    stripped = [r for r in results if r['category'] == 'STRIPPED']
-    errors = [r for r in results if r['category'] == 'ERROR']
-
-    # Print Tables
-    print_table("FULL SYMBOLS (DWARF / Matching PDB Found)", full_syms, args.dir)
-    print_table("PARTIAL SYMBOLS (Symtab / Local Functions)", partial_syms, args.dir)
-    print_table("MISSING SYMBOLS (Expected PDB but not downloaded)", missing_syms, args.dir)
-    print_table("FULLY STRIPPED", stripped, args.dir)
-    print_table("ERRORS", errors, args.dir)
-
-    # --- Write to Log Files ---
-    success_log = os.path.join(args.dir, "symbols_found.log")
-    missing_log = os.path.join(args.dir, "symbols_missing.log")
-    error_log = os.path.join(args.dir, "analysis_errors.log")
-
-    with open(success_log, "w", encoding="utf-8") as f_succ, \
-         open(missing_log, "w", encoding="utf-8") as f_miss, \
-         open(error_log, "w", encoding="utf-8") as f_err:
-        
-        for res in results:
-            rel_path = os.path.relpath(res['file'], args.dir)
-            exports_info = f"Exports: {res['exports_count']}"
-            if 0 < res['exports_count'] <= 10:
-                exports_info += f" ({', '.join(res['exports'])})"
-            elif res['exports_count'] > 10:
-                exports_info += f" ({', '.join(res['exports'][:5])}...)"
-            
-            line = f"{res['category']:<10} | {res.get('arch', 'Unknown'):<18} | {res['details']:<40} | {exports_info:<50} | {rel_path}\n"
-            
-            if res['category'] == 'ERROR':
-                f_err.write(line)
-            elif res['category'] in ('FULL', 'PARTIAL'):
-                f_succ.write(line)
-            else:
-                f_miss.write(line)
-
-    print("\n" + "-" * 100)
-    print(f"Log files generated in '{args.dir}':")
-    print(f" -> symbols_found.log")
-    print(f" -> symbols_missing.log")
-    print(f" -> analysis_errors.log")
-
-
-if __name__ == "__main__":
-    main()
+main()

@@ -5,9 +5,12 @@ Download Steam game depots and analyze binaries for debug symbols.
 ## Requirements
 
 - Python 3.14+
-- [DepotDownloader](https://github.com/SteamRE/DepotDownloader)
+- [.NET SDK](https://dotnet.microsoft.com/download) (for DepotDownloader)
+- [symwalker](https://github.com/19h/symwalker) (in PATH)
 
-Install via: `winget install --exact --id SteamRE.DepotDownloader`
+Install symwalker: `cargo install symwalker` or download from releases.
+
+Install DepotDownloader: `winget install --exact --id SteamRE.DepotDownloader`
 
 ## Setup
 
@@ -20,6 +23,7 @@ uv run playwright install chromium
 ```
 
 Verify DepotDownloader: `DepotDownloader --help`
+Verify symwalker: `symwalker --version`
 
 ## Config
 
@@ -47,13 +51,31 @@ uv run main.py --mode download
 
 # Analyze only
 uv run main.py --mode analyze
+
+# Regenerate HTML from existing JSON
+uv run main.py --html
 ```
 
 ## Output
 
-Results in `analysis_results.json` - debug/symbol info for each binary.
+- `analysis_results.json` - raw analysis data
+- `analysis_results.html` - interactive HTML report
 
-HTML report: `analysis_results.html` - sortable table with folder filter.
+### HTML Report Features
+
+- Sortable columns (click header to sort)
+- Search/filter by filename
+- Green rows = has debug info (DWARF)
+- Orange rows = no debug info (stripped)
+- Shows: architecture, binary type, security flags (NX, RELRO, canary, etc.)
+
+### symwalker provides
+
+- DWARF debug sections detection
+- Build ID extraction
+- dSYM bundle detection (macOS)
+- debuginfod remote symbol lookup
+- Security analysis (PIE, NX, RELRO, stack canary, FORTIFY)
 
 ## Ignore Files
 

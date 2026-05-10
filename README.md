@@ -1,6 +1,15 @@
 # Steam Depot Tool
 
-Download Steam game depots and analyze binaries for debug symbols.
+Scrapes SteamDB for depot manifests, downloads game files, and analyzes binaries for debug symbols.
+
+**Problem:** Want to analyze debug info in Steam games? This tool downloads specific depots and tells you which binaries have DWARF/stripped symbols, security features (NX, RELRO, canary), and more.
+
+## Features
+
+- Fetch depot manifests from SteamDB
+- Download depot files via DepotDownloader
+- Analyze ELF/Mach-O binaries with symwalker
+- Interactive HTML report
 
 ## Requirements
 

@@ -1,7 +1,16 @@
-username: ""
+username: "bukowa51"
 password: "" # Optional
 branch: "public"
 headless: false
 download:
-  "297000": # App ID
-    - "297001" # Depot ID
+  "214950": # Rome2
+    - "214952"
+    - "214969"
+  "325610":
+    - "325612"
+    - "325624"
+    - "325623"
+  "712100":
+    - "712101"
+    - "814262"
+    - "752676"

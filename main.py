@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
-import os, sys, json, struct, argparse, subprocess, time, logging
+import os, sys, json, subprocess, argparse, logging
 from datetime import datetime
 from collections import defaultdict
-from bs4 import BeautifulSoup
-
-try:
-    import lief
-    lief.logging.disable()
-except ImportError:
-    print("ERROR: LIEF not installed. Run: uv sync")
-    sys.exit(1)
-
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    print("ERROR: playwright not installed. Run: uv sync")
-    sys.exit(1)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,22 +13,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MAGIC_BYTES = {
-    b'MZ': 'PE', b'\x7fELF': 'ELF',
-    b'\xfe\xed\xfa\xce': 'MachO32', b'\xce\xfa\xed\xfe': 'MachO32RE',
-    b'\xfe\xed\xfa\xcf': 'MachO64', b'\xcf\xfa\xed\xfe': 'MachO64RE',
-    b'\xca\xfe\xba\xbe': 'FatBinary', b'\xbe\xba\xfe\xca': 'FatBinaryRE',
-}
-
 
 class SteamDBScraper:
     def __init__(self, headless=False):
         self.headless = headless
+        from playwright.sync_api import sync_playwright
+        self.sync_playwright = sync_playwright
 
     def fetch_manifests(self, depot_id):
+        from bs4 import BeautifulSoup
         url = f"https://steamdb.info/depot/{depot_id}/manifests/"
         
-        with sync_playwright() as p:
+        with self.sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             page = browser.new_page()
             
@@ -140,110 +122,30 @@ def detect_format(path):
     try:
         with open(path, 'rb') as f:
             h = f.read(4)
-        for m, fmt in MAGIC_BYTES.items():
+        for m, fmt in [(b'MZ', 'PE'), (b'\x7fELF', 'ELF'), (b'\xfe\xed\xfa\xce', 'MachO32'), (b'\xce\xfa\xed\xfe', 'MachO32RE'), (b'\xfe\xed\xfa\xcf', 'MachO64'), (b'\xcf\xfa\xed\xfe', 'MachO64RE'), (b'\xca\xfe\xba\xbe', 'FatBinary'), (b'\xbe\xba\xfe\xca', 'FatBinaryRE')]:
             if h.startswith(m): return fmt
     except: pass
     return None
 
-def parse_rich_header(data):
-    try:
-        i = data.find(b'Rich')
-        if i == -1: return None
-        key = struct.unpack('<I', data[i+4:i+8])[0]
-        dans = 0x536e6144 ^ key
-        di = data.find(struct.pack('<I', dans))
-        if di == -1: return None
-        recs = []
-        for j in range(di+16, i, 8):
-            if j+8 > i: break
-            v1 = struct.unpack('<I', data[j:j+4])[0] ^ key
-            v2 = struct.unpack('<I', data[j+4:j+8])[0] ^ key
-            recs.append({'prod_id': v1>>16, 'build': v1&0xFFFF, 'count': v2})
-        return {'xor_key': hex(key), 'records': recs[:5]}
-    except: return None
 
-def get_arch(bin):
+def run_symwalker(directory):
     try:
-        if isinstance(bin, lief.PE.Binary): p = "Win"
-        elif isinstance(bin, lief.ELF.Binary): p = "Linux"
-        elif isinstance(bin, (lief.MachO.Binary, lief.MachO.FatBinary)): p = "Mac"
-        else: return "Unknown"
-        obj = bin.at(0) if isinstance(bin, lief.MachO.FatBinary) else bin
-        h = obj.abstract.header
-        a = str(h.architecture).split('.')[-1].lower()
-        b = "64" if h.is_64 else "32"
-        am = {"x86_64": "x64", "i386": "x86", "x86": "x86", "aarch64": "arm64", "arm64": "arm64", "arm": "arm"}
-        return f"{p}/{am.get(a,a)} ({b}bit)"
-    except Exception as e: return f"Error: {type(e).__name__}"
-
-def analyze_pe(bin, data):
-    r = {'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
-    rich = parse_rich_header(data)
-    if rich: r['extra']['rich_header'] = rich
-    for dbg in bin.debug:
-        if dbg.type == lief.PE.Debug.TYPES.CODEVIEW:
-            cv = dbg.code_view if hasattr(dbg, 'code_view') else None
-            if cv and cv.filename:
-                r['debug'] = True
-                r['debug_type'] = 'pdb'
-                r['debug_detail'] = cv.filename.split('\\')[-1].split('/')[-1]
-                return r
-    return r
-
-def analyze_elf(bin):
-    r = {'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
-    try:
-        for n in bin.notes:
-            if n.name == "GNU" and "BUILD" in str(n.type).upper():
-                r['extra']['build_id'] = bytes(n.description).hex()
-                break
-    except: pass
-    if bin.has_section(".debug_info"):
-        r['debug'] = True
-        r['debug_type'] = 'dwarf'
-        r['debug_detail'] = '.debug_info present'
-    if bin.has_section(".symtab"): r['symtab'] = True
-    try:
-        ds = list(bin.dynamic_symbols)
-        if ds: r['exports'], r['exports_count'] = True, len(ds)
-    except: pass
-    return r
-
-def analyze_macho(bin):
-    r = {'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
-    obj = bin.at(0) if isinstance(bin, lief.MachO.FatBinary) else bin
-    if obj.has_uuid: r['extra']['uuid'] = bytes(obj.uuid.uuid).hex()
-    if obj.has_section("__debug_info"):
-        r['debug'] = True
-        r['debug_type'] = 'dwarf'
-        r['debug_detail'] = '__debug_info present'
-    if obj.has_symbol_command: r['symtab'] = True
-    try:
-        ex = list(bin.exported_functions) if isinstance(bin, lief.MachO.FatBinary) else list(obj.exported_functions)
-        if ex: r['exports'], r['exports_count'] = True, len(ex)
-    except: pass
-    return r
-
-def analyze_file(path):
-    res = {'file': os.path.basename(path), 'path': path, 'arch': 'Unknown', 'debug': False, 'debug_type': 'stripped', 'debug_detail': None, 'symtab': False, 'exports': False, 'exports_count': 0, 'extra': {}}
-    try:
-        with open(path, 'rb') as f: data = f.read()
-        bin = lief.parse(list(data))
-        if not bin: res['arch'] = 'Parse failed'; return res
+        result = subprocess.run(
+            ['symwalker', directory, '--show-stripped', '--check-remote', '--security', '--json'],
+            capture_output=True, text=True, timeout=600
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        else:
+            logger.warning(f"symwalker failed: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("symwalker timed out")
+    except json.JSONDecodeError as e:
+        logger.error(f"symwalker JSON parse error: {e}")
     except Exception as e:
-        res['arch'] = f'Error: read/parse - {type(e).__name__}'
-        return res
-    try:
-        res['arch'] = get_arch(bin)
-    except Exception as e:
-        res['arch'] = f'Error: arch - {type(e).__name__}'
-    try:
-        if isinstance(bin, lief.PE.Binary): res.update(analyze_pe(bin, data))
-        elif isinstance(bin, lief.ELF.Binary): res.update(analyze_elf(bin))
-        elif isinstance(bin, (lief.MachO.Binary, lief.MachO.FatBinary)): res.update(analyze_macho(bin))
-    except Exception as e:
-        res['extra']['analyze_error'] = f'{type(e).__name__}: {e}'
-    return res
+        logger.error(f"symwalker error: {e}")
+    return []
+
 
 def ignore_path(path, lst):
     pl = path.lower()
@@ -261,24 +163,24 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     logger.info(f"Scanning: {scan_dir}")
     if ign: logger.info(f"Ignoring: {len(ign)} patterns")
     
+    logger.info("Running symwalker...")
+    symwalker_results = run_symwalker(scan_dir)
+    
     dirs = defaultdict(list)
     total = 0
-    for root, ds, fs in os.walk(scan_dir):
-        ds[:] = [d for d in ds if not ignore_path(os.path.join(root, d), ign)]
-        for f in fs:
-            fp = os.path.join(root, f)
-            if ignore_path(fp, ign): continue
-            if detect_format(fp):
-                dirs[os.path.relpath(root, scan_dir)].append(fp)
-                total += 1
+    for entry in symwalker_results:
+        fp = entry['file_path']
+        if ignore_path(fp, ign): continue
+        parent = os.path.dirname(fp)
+        dirs[os.path.relpath(parent, scan_dir)].append(entry)
+        total += 1
     
     logger.info(f"Found {total} binaries in {len(dirs)} dirs")
     
     result = {}
-    for dp, fls in dirs.items():
-        res = [analyze_file(p) for p in fls]
-        res.sort(key=lambda x: (-int(x['debug']), -int(x['symtab']), -x['exports_count']))
-        result[dp] = {'total': len(res), 'files': res}
+    for dp, files in dirs.items():
+        files.sort(key=lambda x: (-int(x.get('has_debug_info', False)), x.get('file_path', '')))
+        result[dp] = {'total': len(files), 'files': files}
     
     out = {'scan_time': datetime.now().isoformat(), 'total_files': total, 'total_directories': len(result), 'directories': result}
     open(output, 'w', encoding='utf-8').write(json.dumps(out, indent=2))
@@ -286,39 +188,41 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     
     generate_html(output)
     
-    dc = sum(1 for d in result.values() for f in d['files'] if f['debug'])
-    sc = sum(1 for d in result.values() for f in d['files'] if f['symtab'])
-    ec = sum(1 for d in result.values() for f in d['files'] if f['exports'])
-    logger.info(f"Debug: {dc}, Symtab: {sc}, Exports: {ec}")
+    dc = sum(1 for d in result.values() for f in d['files'] if f.get('has_debug_info'))
+    logger.info(f"With debug info: {dc}")
 
 def generate_html(json_path):
     html_path = json_path.replace('.json', '.html')
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
-    folders = sorted(data['directories'].keys())
     all_files = []
     for folder, info in data['directories'].items():
         for f in info['files']:
             f['_folder'] = folder
             all_files.append(f)
     
-    all_files.sort(key=lambda x: (-int(x['debug']), -int(x['symtab']), -x['exports_count']))
+    all_files.sort(key=lambda x: (-int(x.get('has_debug_info', False)), -int(x.get('is_executable', False)), x.get('file_path', '')))
     
+    all_keys = set()
+    for f in all_files:
+        all_keys.update(f.keys())
+    all_keys = sorted(all_keys - {'_folder', 'file_path', 'debug_sections', 'debuginfod_url', 'debug_file_path', 'file_modified'})
+    
+    def flag(v, k):
+        if v is None: return '-'
+        if isinstance(v, bool): return '&#10003;' if v else '-'
+        if isinstance(v, list): return ', '.join(str(x) for x in v[:5]) + ('...' if len(v) > 5 else '')
+        return str(v)
+    
+    headers = ['File', 'Folder'] + all_keys
     rows = ''
     for f in all_files:
-        debug_color = '#4caf50' if f['debug'] else '#666'
-        debug_label = f['debug_type'].upper() if f['debug_type'] else '-'
-        sym = '✓' if f['symtab'] else '-'
-        exp = f['exports_count'] if f['exports_count'] else '-'
-        rows += f'''<tr>
-            <td>{f['file']}</td>
-            <td>{f['arch']}</td>
-            <td style="color:{debug_color};font-weight:bold">{debug_label}</td>
-            <td>{sym}</td>
-            <td>{exp}</td>
-            <td style="color:#888;font-size:85%">{f['_folder']}</td>
-        </tr>'''
+        cells = [f'<td class="file-cell">{os.path.basename(f.get("file_path", ""))}</td>', f'<td class="folder-cell">{f.get("_folder", "")}</td>']
+        for k in all_keys:
+            v = f.get(k)
+            cells.append(f'<td>{flag(v, k)}</td>')
+        rows += f'<tr class="{"has-debug" if f.get("has_debug_info") else "no-debug"}">{"".join(cells)}</tr>'
     
     html = f'''<!DOCTYPE html>
 <html>
@@ -327,68 +231,58 @@ def generate_html(json_path):
     <title>Steam Depot Analysis</title>
     <style>
         body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin: 20px; background: #1a1a1a; color: #eee; }}
-        h1 {{ color: #fff; }}
-        .controls {{ margin: 15px 0; }}
-        select {{ padding: 8px; background: #333; color: #fff; border: 1px solid #555; border-radius: 4px; }}
+        h1 {{ color: #fff; margin-bottom: 5px; }}
+        .stats {{ color: #888; margin-bottom: 15px; }}
+        .search-box {{ margin-bottom: 15px; }}
+        .search-box input {{ padding: 8px 12px; width: 300px; background: #333; border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 13px; }}
+        .search-box input:focus {{ outline: none; border-color: #4caf50; }}
         table {{ border-collapse: collapse; width: 100%; background: #252525; }}
-        th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #333; }}
-        th {{ background: #333; cursor: pointer; user-select: none; }}
+        th, td {{ padding: 8px 10px; text-align: left; border-bottom: 1px solid #333; font-size: 12px; white-space: nowrap; }}
+        th {{ background: #333; cursor: pointer; user-select: none; position: sticky; top: 0; }}
         th:hover {{ background: #444; }}
         tr:hover {{ background: #2a2a2a; }}
-        .stats {{ margin: 20px 0; color: #888; }}
+        .file-cell {{ color: #4caf50; }}
+        .no-debug .file-cell {{ color: #ff9800; }}
+        tr.hidden {{ display: none; }}
+        .folder-cell {{ color: #666; font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }}
     </style>
 </head>
 <body>
     <h1>Steam Depot Analysis</h1>
-    <div class="stats">
-        {data['total_files']} binaries in {data['total_directories']} folders | 
-        Scanned: {data['scan_time']}
-    </div>
-    <div class="controls">
-        <label>Folder: </label>
-        <select id="folderFilter" onchange="filterFolder()">
-            <option value="">All</option>
-            {"".join(f'<option value="{f}">{f}</option>' for f in folders)}
-        </select>
+    <div class="stats">{data['total_files']} binaries in {data['total_directories']} folders</div>
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="Search..." oninput="filterTable()">
     </div>
     <table id="table">
         <thead>
             <tr>
-                <th onclick="sort(0)">File</th>
-                <th onclick="sort(1)">Arch</th>
-                <th onclick="sort(2)">Debug</th>
-                <th onclick="sort(3)">Sym</th>
-                <th onclick="sort(4)">Exp</th>
-                <th onclick="sort(5)">Folder</th>
+                {"".join(f'<th onclick="sortTable(this.cellIndex)">{h}</th>' for h in headers)}
             </tr>
         </thead>
         <tbody id="tbody">{rows}</tbody>
     </table>
     <script>
-        let asc = true;
-        function sort(col) {{
+        let sortAsc = true;
+        let sortCol = 0;
+
+        function filterTable() {{
+            const search = document.getElementById('searchInput').value.toLowerCase();
+            document.querySelectorAll('#tbody tr').forEach(row => {{
+                row.style.display = row.textContent.toLowerCase().includes(search) ? '' : 'none';
+            }});
+        }}
+
+        function sortTable(col) {{
+            if (sortCol === col) sortAsc = !sortAsc;
+            else {{ sortAsc = true; sortCol = col; }}
             const tbody = document.getElementById('tbody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
-            const idx = col === 0 ? 0 : col === 1 ? 1 : col === 2 ? 2 : col === 3 ? 3 : col === 4 ? 4 : 5;
             rows.sort((a, b) => {{
-                const A = a.cells[idx].textContent.trim().toLowerCase();
-                const B = b.cells[idx].textContent.trim().toLowerCase();
-                if (col === 2) {{
-                    const order = {{'dwarf':3, 'pdb':2, 'stripped':0}};
-                    const va = order[a.cells[2].textContent.toLowerCase()] ?? 0;
-                    const vb = order[b.cells[2].textContent.toLowerCase()] ?? 0;
-                    return asc ? vb - va : va - vb;
-                }}
-                if (col === 3) {{ return asc ? (a.cells[3].textContent === '✓' ? 1 : 0) - (b.cells[3].textContent === '✓' ? 1 : 0) : (b.cells[3].textContent === '✓' ? 1 : 0) - (a.cells[3].textContent === '✓' ? 1 : 0); }}
-                if (col === 4) {{ return asc ? parseInt(b.cells[4].textContent) - parseInt(a.cells[4].textContent) : parseInt(a.cells[4].textContent) - parseInt(b.cells[4].textContent); }}
-                return asc ? A.localeCompare(B) : B.localeCompare(A);
+                const A = a.cells[col].textContent.trim();
+                const B = b.cells[col].textContent.trim();
+                return sortAsc ? A.localeCompare(B) : B.localeCompare(A);
             }});
             rows.forEach(r => tbody.appendChild(r));
-            asc = !asc;
-        }}
-        function filterFolder() {{
-            const f = document.getElementById('folderFilter').value;
-            document.querySelectorAll('#tbody tr').forEach(r => r.style.display = f && !r.cells[5].textContent.includes(f) ? 'none' : '');
         }}
     </script>
 </body>

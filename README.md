@@ -1,13 +1,9 @@
-# Steam Depot Tool
-
-Scrapes SteamDB for depot manifests, downloads game files, and analyzes binaries for debug symbols.
-
-**Problem:** Want to analyze debug info in Steam games? This tool downloads specific depots and tells you which binaries have DWARF/stripped symbols, security features (NX, RELRO, canary), and more.
+# steamdepoter
 
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (python package manager)
-- Steam account (for DepotDownloader)
+- Steam account (for DepotDownloader / SteamDB)
 
 ## Quick Start
 

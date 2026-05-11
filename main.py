@@ -1,604 +1,419 @@
 #!/usr/bin/env python3
-import os, sys, json, subprocess, argparse, logging, time
+import sys, os, subprocess, shutil, json, argparse, logging, time, yaml, re
 from datetime import datetime
 from collections import defaultdict
 
-# --- Paths Configuration ---
+# --- Configuration & Constants ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROFILE_DIR = os.path.join(BASE_DIR, "steamdb_profile")
-MANIFEST_CACHE = os.path.join(BASE_DIR, "manifest_cache.json")
-DOWNLOAD_DIR = os.path.join(BASE_DIR, "manifest_downloads")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.yaml")
+MANIFEST_CACHE_DIR = os.path.join(BASE_DIR, "manifest_cache")
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "manifest_downloads")
 LOG_FILE = os.path.join(BASE_DIR, "steamdepoter.log")
+JS_OUTPUT_FILE = os.path.join(BASE_DIR, "scrape.js")
+APP_INFO_CACHE = os.path.join(BASE_DIR, "app_info.json")
+
+REQUIRED_BINS = ["DepotDownloader.exe", "pdbwalker.exe", "symwalker.exe"]
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("steamdepoter")
 
+# --- 1. System Checks ---
 
-class SteamDBScraper:
-    """
-    Scrapes SteamDB manifests using a persistent browser profile.
-    """
+def check_dependencies():
+    """Ensure all required binaries and config exist."""
+    missing_bins = [b for b in REQUIRED_BINS if not (os.path.exists(b) or shutil.which(b) or shutil.which(b.replace('.exe', '')))]
+    if missing_bins:
+        logger.error(f"Missing required executables: {', '.join(missing_bins)}")
+        sys.exit(1)
+    
+    if not os.path.exists(CONFIG_FILE):
+        logger.error(f"Config file not found: {CONFIG_FILE}")
+        sys.exit(1)
 
-    # Simple detection: If 'Sign out' text is on the page, we are logged in.
-    LOGGED_IN_SELECTOR = "text='Sign out'"
-    LOGIN_TIMEOUT_MS = 300_000
+# --- 2. Data Helpers ---
 
-    def __init__(self):
-        from playwright.sync_api import sync_playwright
-        from bs4 import BeautifulSoup
-        self.sync_playwright = sync_playwright
-        self.BeautifulSoup = BeautifulSoup
-        os.makedirs(PROFILE_DIR, exist_ok=True)
-        self._playwright = None
-        self._context = None
-        self._page = None
-        self._logged_in_verified = False
-        self._cache = self._load_cache()
+def load_config():
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f) or {}
 
-    def _load_cache(self):
-        if os.path.exists(MANIFEST_CACHE):
+def load_cache():
+    cache = {}
+    if not os.path.exists(MANIFEST_CACHE_DIR):
+        os.makedirs(MANIFEST_CACHE_DIR, exist_ok=True)
+        # Migrate old single file if it exists
+        old_file = os.path.join(BASE_DIR, "manifest_cache.json")
+        if os.path.exists(old_file):
+            shutil.move(old_file, os.path.join(MANIFEST_CACHE_DIR, "migrated_default.json"))
+            logger.info("Migrated old manifest_cache.json to manifest_cache/migrated_default.json")
+    
+    for filename in os.listdir(MANIFEST_CACHE_DIR):
+        if filename.endswith(".json"):
+            path = os.path.join(MANIFEST_CACHE_DIR, filename)
             try:
-                with open(MANIFEST_CACHE, "r") as f:
-                    return json.load(f)
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for depot_id, manifests in data.items():
+                        depot_id_str = str(depot_id)
+                        if depot_id_str not in cache:
+                            cache[depot_id_str] = manifests
+                        else:
+                            # Merge and deduplicate by manifest_id
+                            existing_ids = {m['manifest_id'] for m in cache[depot_id_str]}
+                            for m in manifests:
+                                if m['manifest_id'] not in existing_ids:
+                                    cache[depot_id_str].append(m)
             except Exception as e:
-                logger.error(f"Failed to load manifest cache: {e}")
-        return {}
+                logger.error(f"Failed to load cache file {filename}: {e}")
+    
+    if cache:
+        logger.info(f"Loaded {len(cache)} depots from {len([f for f in os.listdir(MANIFEST_CACHE_DIR) if f.endswith('.json')])} cache files.")
+    return cache
 
-    def _save_cache(self):
-        try:
-            with open(MANIFEST_CACHE, "w") as f:
-                json.dump(self._cache, f, indent=4)
-        except Exception as e:
-            logger.error(f"Failed to save manifest cache: {e}")
+def load_app_info():
+    if os.path.exists(APP_INFO_CACHE):
+        with open(APP_INFO_CACHE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-    def __enter__(self):
-        return self
+def save_app_info(info):
+    with open(APP_INFO_CACHE, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2)
 
-    def _ensure_browser(self):
-        if self._page:
-            return
-
-        import random
-        self._playwright = self.sync_playwright().start()
-        
-        # Randomize viewport slightly to avoid static fingerprints
-        random_width = 1280 + random.randint(0, 100)
-        random_height = 800 + random.randint(0, 100)
-        
-        logger.info("Starting local scraper instance...")
-        try:
-            # Try connection first
-            logger.info("Attempting to connect to a real Chrome instance on 127.0.0.1:9222...")
-            self._browser = self._playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
-            self._context = self._browser.contexts[0]
-            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
-            logger.info("SUCCESS: Connected to your real Chrome browser!")
-            self._is_connected_to_real = True
-        except Exception:
-            logger.info("Starting isolated browser context...")
-            self._context = self._playwright.chromium.launch_persistent_context(
-                PROFILE_DIR,
-                headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--start-maximized"
-                ],
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": random_width, "height": random_height},
-                locale="en-US",
-                timezone_id="America/New_York"
-            )
-            self._page = self._context.new_page()
-            self._is_connected_to_real = False
-        
-        self._page.set_default_timeout(60000)
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        try:
-            if hasattr(self, "_is_connected_to_real") and self._is_connected_to_real:
-                if self._playwright:
-                    self._playwright.stop()
-            else:
-                if self._context:
-                    self._context.close()
-                if self._playwright:
-                    self._playwright.stop()
-        except Exception:
-            pass
-
-    def _is_logged_in(self) -> bool:
-        if self._page.is_closed():
-            return False
-        try:
-            return self._page.locator(self.LOGGED_IN_SELECTOR).count() > 0
-        except Exception:
-            return False
-
-    def _ensure_logged_in(self) -> bool:
-        if self._logged_in_verified:
-            return True
-
-        if self._page.is_closed():
-            return False
-
-        # Check current page first
-        if self._is_logged_in():
-            self._logged_in_verified = True
-            return True
-
-        # Go to homepage to check
-        logger.info("Checking SteamDB login status...")
-        try:
-            self._page.goto("https://steamdb.info/", wait_until="domcontentloaded")
-            if self._is_logged_in():
-                logger.info("SteamDB: already logged in via saved profile.")
-                self._logged_in_verified = True
-                return True
-        except Exception:
-            pass
-
-        logger.warning(
-            "SteamDB: NOT logged in. Please log in manually in the browser window now."
-        )
-        
-        # Wait for any of the logged-in selectors to appear
-        start_time = time.time()
-        while time.time() - start_time < (self.LOGIN_TIMEOUT_MS / 1000):
-            if self._page.is_closed():
-                logger.error("Browser was closed during login.")
-                return False
-            if self._is_logged_in():
-                logger.info("SteamDB: login detected!")
-                self._logged_in_verified = True
-                return True
-            time.sleep(1)
-
-        logger.error("SteamDB: login timeout.")
-        return False
-
-    def fetch_manifests(self, depot_id):
-        # Check cache first
-        depot_id_str = str(depot_id)
-        if depot_id_str in self._cache:
-            logger.info(f"Using cached manifests for Depot {depot_id}")
-            return self._cache[depot_id_str]
-
-        # Cache miss - we need the browser now
-        self._ensure_browser()
-
-        if self._page.is_closed():
-            return []
-
-        url = f"https://steamdb.info/depot/{depot_id}/manifests/"
-
-        self._ensure_logged_in()
-        
-        if self._page.is_closed():
-            return []
-
-        logger.info(f"Navigating to {url}...")
-        # Random delay to seem more human
-        time.sleep(2)
-        
-        self._page.goto(url, wait_until="domcontentloaded")
-        
-        # Give Cloudflare background checks a chance to settle (from BQL guide)
-        logger.info("Waiting 5s for background challenges to settle...")
-        time.sleep(5)
-
-        logger.info("Waiting for manifests table to load...")
-        try:
-            self._page.wait_for_selector("tr[data-branch]", timeout=60_000)
-            logger.info("Table loaded successfully!")
-        except Exception as e:
-            logger.error(f"Failed to find manifests table: {e}")
-            return []
-
-        # Small delay before grabbing content to allow any JS to settle
-        time.sleep(1)
-        html_content = self._page.content()
-
-        manifests = self._parse_html(html_content)
-        
-        if manifests:
-            self._cache[depot_id_str] = manifests
-            self._save_cache()
-            
-        return manifests
-
-    def _parse_html(self, html):
-        soup = self.BeautifulSoup(html, "html.parser")
-        manifests = []
-
-        for row in soup.find_all("tr"):
-            branch = row.get("data-branch")
-            if not branch:
-                continue
-
-            time_td = row.find("td", class_="timeago")
-            if not time_td:
-                continue
-            date_str = time_td.get("data-time")
-
-            manifest_td = row.find("td", class_="tabular-nums")
-            if not manifest_td:
-                continue
-
-            a_tag = manifest_td.find("a")
-            if not a_tag:
-                continue
-
-            manifest_id = a_tag.text.strip()
-
-            manifests.append({
-                "branch": branch,
-                "date": date_str,
-                "manifest_id": manifest_id,
-            })
-
-        return manifests
-
-
-class DepotDownloader:
-    def __init__(self, path=DUMPER_EXE):
-        self.path = path
-        self.base_dest_dir = DOWNLOAD_DIR
-        self.cache_file = os.path.join(self.base_dest_dir, "download_cache.json")
-        self.cache = self._load_cache()
-
-    def _load_cache(self):
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass
-        return {}
-
-    def _save_cache(self):
-        with open(self.cache_file, 'w', encoding='utf-8') as f:
-            json.dump(self.cache, f, indent=2)
-
-    def _cache_key(self, app_id, depot_id, manifest_id):
-        return f"{app_id}-{depot_id}-{manifest_id}"
-
-    def download(self, app_id, depot_id, manifest_id, username, password=None):
-        key = self._cache_key(app_id, depot_id, manifest_id)
-        if key in self.cache:
-            logger.info(f"Skipping (cached): {manifest_id}")
-            return True
-
-        logger.info(f"Downloading manifest: {manifest_id}")
-
-        dest_dir = os.path.join(self.base_dest_dir, str(app_id), str(depot_id), str(manifest_id))
-
-        cmd = [
-            self.path,
-            "-app", str(app_id),
-            "-depot", str(depot_id),
-            "-manifest", str(manifest_id),
-            "-username", username,
-            "-dir", dest_dir,
-            "-remember-password"
-        ]
-
-        if password:
-            cmd.extend(["-password", password])
-
-        for attempt in range(1, 6):
-            try:
-                subprocess.run(cmd, check=True)
-                logger.info(f"Downloaded: {manifest_id}")
-                self.cache[key] = {"downloaded_at": datetime.now().isoformat()}
-                self._save_cache()
-                return True
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Attempt {attempt}/5 failed: {e}")
-                if attempt == 5:
-                    return False
-                time.sleep(3)
-            except FileNotFoundError:
-                logger.error(f"DepotDownloader not found in PATH")
-                return False
-        return False
-
-
-def detect_format(path):
+def fetch_app_name(app_id):
+    """Fetch app name anonymously using DepotDownloader."""
+    logger.info(f"Fetching name for App {app_id}...")
     try:
-        with open(path, 'rb') as f:
-            h = f.read(4)
-        for m, fmt in [(b'MZ', 'PE'), (b'\x7fELF', 'ELF'), (b'\xfe\xed\xfa\xce', 'MachO32'), (b'\xce\xfa\xed\xfe', 'MachO32RE'), (b'\xfe\xed\xfa\xcf', 'MachO64'), (b'\xcf\xfa\xed\xfe', 'MachO64RE'), (b'\xca\xfe\xba\xbe', 'FatBinary'), (b'\xbe\xba\xfe\xca', 'FatBinaryRE')]:
-            if h.startswith(m): return fmt
-    except: pass
-    return None
-
-
-def run_symwalker(directory):
-    try:
-        result = subprocess.run(
-            ['symwalker', directory, '--show-stripped', '--check-remote', '--security', '--json'],
-            capture_output=True, text=True, timeout=600
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
+        res = subprocess.run(["DepotDownloader.exe", "-app", str(app_id)], capture_output=True, text=True, timeout=15)
+        match = re.search(fr"App {app_id} \((.*?)\)", res.stdout + res.stderr)
+        if match:
+            name = match.group(1)
+            logger.info(f"  -> Found: {name}")
+            return name
     except Exception as e:
-        logger.warning(f"symwalker error: {e}")
-    return []
+        logger.error(f"Failed to fetch app name: {e}")
+    return f"App {app_id}"
 
-def run_pdbwalker(directory):
-    try:
-        result = subprocess.run(
-            ['pdbwalker', directory, '--check-remote', '--json'],
-            capture_output=True, text=True, timeout=600
-        )
-        if result.returncode == 0:
-            lines = [l for l in result.stdout.strip().split('\n') if l.strip()]
-            return [json.loads(l) for l in lines]
-    except Exception as e:
-        logger.warning(f"pdbwalker error: {e}")
-    return []
+# --- 3. Step: Scrape (JS Generation) ---
 
+def generate_js_scraper(depots_to_scrape, existing_cache):
+    """Generates the JS snippet for manual browser console execution."""
+    depots_json = json.dumps(depots_to_scrape, indent=2)
+    cache_json = json.dumps(existing_cache, indent=2)
 
-def analyze(scan_dir="manifest_downloads", output="analysis_results.json"):
-    if not os.path.isdir(scan_dir):
-        logger.error(f"Directory not found: {scan_dir}")
+    js_template = f"""// SteamDB Manifest Scraper (Popup Edition)
+(async () => {{
+    const depots = {depots_json};
+    const results = {cache_json};
+    const delay = ms => new Promise(r => setTimeout(r, ms));
+
+    console.log("%c[!] Make sure you allowed POPUPS in your browser!", "color: yellow; font-weight: bold; font-size: 14px;");
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const {{app_id, depot_id}} of depots) {{
+        const url = `https://steamdb.info/depot/${{depot_id}}/manifests/`;
+        console.log(`[*] Processing ${{depot_id}} (app ${{app_id}})...`);
+        
+        const popup = window.open(url, '_blank', 'width=800,height=600');
+        
+        if (!popup) {{ 
+            console.error("[-] ERROR: Popup was blocked by the browser!"); 
+            break; 
+        }}
+
+        let manifests = [];
+        try {{
+            await new Promise((resolve, reject) => {{
+                let attempts = 0;
+                const checkInterval = setInterval(() => {{
+                    attempts++;
+                    
+                    const rows = popup.document.querySelectorAll('tr[data-branch]');
+                    
+                    if (rows.length > 0) {{
+                        clearInterval(checkInterval);
+                        
+                        rows.forEach(row => {{
+                            const branch = row.getAttribute('data-branch');
+                            const timeTd = row.querySelector('td.timeago');
+                            const manifestTd = row.querySelector('td.tabular-nums a');
+                            if (timeTd && manifestTd) {{
+                                manifests.push({{
+                                    branch: branch,
+                                    date: timeTd.getAttribute('data-time'),
+                                    manifest_id: manifestTd.textContent.trim()
+                                }});
+                            }}
+                        }});
+                        resolve();
+                    }}
+
+                    if (attempts > 100) {{ // ~20 seconds
+                        clearInterval(checkInterval);
+                        reject("Timeout: Manifests not found (possible Cloudflare or not logged in).");
+                    }}
+                }}, 200);
+            }});
+
+            console.log(`  -> Success: Found ${{manifests.length}} manifests.`);
+            results[depot_id] = manifests;
+            successCount++;
+
+        }} catch (err) {{
+            console.error(`  -> ERROR for ${{depot_id}}:`, err);
+            failCount++;
+        }}
+        
+        popup.close();
+        
+        const nextDelay = Math.floor(Math.random() * 5000) + 5000;
+        console.log(`[*] Waiting ${{nextDelay}}ms before next...`);
+        await delay(nextDelay); 
+    }}
+
+    const json = JSON.stringify(results, null, 4);
+    const blob = new Blob([json], {{type: 'application/json'}});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'manifest_cache.json';
+    a.click();
+    
+    console.log("%c========================================", "color: white; font-weight: bold;");
+    console.log(`%cFINISHED! Success: ${{successCount}}, Errors: ${{failCount}}`, successCount > 0 ? "color: green;" : "color: red;");
+    if (failCount > 0) {{
+        console.log("%c[!] Some depots could not be scraped (e.g. due to Cloudflare).", "color: yellow;");
+        console.log("%cSTRATEGY: Save the downloaded file to your project and run 'uv run main.py scrape' again.", "color: yellow; font-weight: bold;");
+    }}
+    console.log("%c========================================", "color: white; font-weight: bold;");
+}})();
+"""
+    with open(JS_OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(js_template)
+    
+    logger.info(f"Generated {JS_OUTPUT_FILE}")
+    print("\n" + "="*60 + "\nMANUAL ACTION REQUIRED:")
+    print(f"1. Open https://steamdb.info (logged in)\n2. Paste contents of {JS_OUTPUT_FILE} into Console (F12)")
+    print(f"3. Move the downloaded 'manifest_cache.json' to folder: {MANIFEST_CACHE_DIR}")
+    print("   (You can rename it to something descriptive like 'app_name.json')")
+    print("4. Run: uv run main.py download\n" + "="*60 + "\n")
+
+# --- 4. Step: Download ---
+
+def download_depots(config, cache):
+    """Downloads all manifests for the configured branch."""
+    username = config.get("username")
+    password = config.get("password", "")
+    branch = config.get("branch", "public")
+    apps_config = config.get("download", {})
+
+    if not username:
+        logger.error("Username missing in config.yaml")
         return
 
-    logger.info(f"Scanning: {scan_dir}")
+    to_download = []
+    for app_id, depots in apps_config.items():
+        for depot_id in depots:
+            manifests = cache.get(str(depot_id), [])
+            branch_manifests = [m for m in manifests if m['branch'] == branch]
+            for m in branch_manifests:
+                to_download.append({'app_id': app_id, 'depot_id': depot_id, 'manifest_id': m['manifest_id']})
 
-    all_results = []
-    logger.info("Running symwalker (ELF/Mach-O)...")
-    all_results.extend(run_symwalker(scan_dir))
+    if not to_download:
+        logger.warning("No manifests found in cache to download.")
+        return
+
+    logger.info(f"Starting download of {len(to_download)} manifests...")
+    download_cache_file = os.path.join(DOWNLOAD_DIR, "download_cache.json")
+    dl_cache = {}
+    if os.path.exists(download_cache_file):
+        with open(download_cache_file, 'r') as f: dl_cache = json.load(f)
+
+    app_info = load_app_info()
+    for item in to_download:
+        app_id_str = str(item['app_id'])
+        if app_id_str not in app_info:
+            app_info[app_id_str] = fetch_app_name(item['app_id'])
+            save_app_info(app_info)
+
+        key = f"{item['app_id']}-{item['depot_id']}-{item['manifest_id']}"
+        if key in dl_cache:
+            logger.info(f"Skipping cached download: {item['manifest_id']}")
+            continue
+
+        dest = os.path.join(DOWNLOAD_DIR, str(item['app_id']), str(item['depot_id']), str(item['manifest_id']))
+        cmd = ["DepotDownloader.exe", "-app", str(item['app_id']), "-depot", str(item['depot_id']), 
+               "-manifest", str(item['manifest_id']), "-username", username, "-dir", dest, "-remember-password"]
+        if password: cmd.extend(["-password", password])
+
+        try:
+            subprocess.run(cmd, check=True)
+            dl_cache[key] = {"at": datetime.now().isoformat()}
+            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+            with open(download_cache_file, 'w') as f: json.dump(dl_cache, f, indent=2)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Download failed for {item['manifest_id']}: {e}")
+
+# --- 5. Step: Analyze ---
+
+def analyze_depots():
+    """Runs symwalker and pdbwalker on downloaded files."""
+    if not os.path.isdir(DOWNLOAD_DIR): return
+
+    results = []
+    logger.info("Analyzing binaries...")
     
-    logger.info("Running pdbwalker (PE)...")
-    all_results.extend(run_pdbwalker(scan_dir))
-    
-    dirs = defaultdict(list)
-    total = 0
-    for entry in all_results:
+    try:
+        sym = subprocess.run(['symwalker', DOWNLOAD_DIR, '--show-stripped', '--check-remote', '--security', '--json'], capture_output=True, text=True)
+        if sym.returncode == 0: results.extend(json.loads(sym.stdout))
+        
+        pdb = subprocess.run(['pdbwalker', DOWNLOAD_DIR, '--check-remote', '--json'], capture_output=True, text=True)
+        if pdb.returncode == 0: results.extend([json.loads(l) for l in pdb.stdout.strip().split('\n') if l.strip()])
+    except Exception as e:
+        logger.error(f"Analysis tool error: {e}")
+
+    app_info = load_app_info()
+    for entry in results:
         fp = entry.get('file_path', '')
-        parent = os.path.dirname(fp)
-        dirs[os.path.relpath(parent, scan_dir)].append(entry)
-        total += 1
+        # Extract AppID from path: manifest_downloads/{app_id}/{depot_id}/...
+        rel = os.path.relpath(fp, DOWNLOAD_DIR)
+        parts = rel.split(os.sep)
+        if len(parts) > 0:
+            app_id = parts[0]
+            entry['app_name'] = app_info.get(app_id, f"App {app_id}")
+
+    # Process and save results
+    dirs = defaultdict(list)
+    for entry in results:
+        dirs[os.path.relpath(os.path.dirname(entry.get('file_path', '')), DOWNLOAD_DIR)].append(entry)
     
-    logger.info(f"Found {total} binaries in {len(dirs)} dirs")
+    out = {
+        'scan_time': datetime.now().isoformat(),
+        'total_files': len(results),
+        'directories': {dp: {'total': len(fs), 'files': sorted(fs, key=lambda x: (not has_debug(x), x.get('file_path')))} for dp, fs in dirs.items()}
+    }
     
-    result = {}
-    for dp, files in dirs.items():
-        files.sort(key=lambda x: (
-            -int(has_debug(x)),
-            x.get('file_path', '')
-        ))
-        result[dp] = {'total': len(files), 'files': files}
+    with open("analysis_results.json", 'w', encoding='utf-8') as f:
+        json.dump(out, f, indent=2)
     
-    out = {'scan_time': datetime.now().isoformat(), 'total_files': total, 'total_directories': len(result), 'directories': result}
-    open(output, 'w', encoding='utf-8').write(json.dumps(out, indent=2))
-    logger.info(f"Results: {output}")
-    
-    generate_html(output)
-    
-    dc = sum(1 for d in result.values() for f in d['files'] if f.get('has_debug_info') or f.get('local_pdb', {}).get('available') or f.get('remote_pdb', {}).get('available'))
-    logger.info(f"With debug info: {dc}")
+    generate_html_report("analysis_results.json")
+    logger.info(f"Analysis complete. Results in analysis_results.json and .html")
 
 def has_debug(f):
-    return (f.get('has_debug_info') == True or 
-            f.get('local_pdb', {}).get('available') == True or 
-            f.get('remote_pdb', {}).get('available') == True)
+    return f.get('has_debug_info') or f.get('local_pdb', {}).get('available') or f.get('remote_pdb', {}).get('available')
 
-def generate_html(json_path):
+def generate_html_report(json_path):
     html_path = json_path.replace('.json', '.html')
-    with open(json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    with open(json_path, 'r', encoding='utf-8') as f: data = json.load(f)
     
     all_files = []
     for folder, info in data['directories'].items():
         for f in info['files']:
             f['_folder'] = folder
             all_files.append(f)
+    all_files.sort(key=lambda x: (not has_debug(x), x.get('file_path', '')))
     
-    all_files.sort(key=lambda x: (-int(has_debug(x)), x.get('file_path', '')))
-    
-    all_keys = set()
+    headers = ['File', 'Game', 'Folder', 'Debug Info', 'Stripped', 'Local PDB', 'Remote PDB', 'Build ID']
+    rows = ""
     for f in all_files:
-        all_keys.update(f.keys())
-    excluded = {'_folder', 'file_path', 'debug_sections', 'debuginfod_url', 'debug_file_path', 'file_modified'}
-    left_cols = ['has_debug_info', 'is_stripped', 'dsym_bundle', 'local_pdb', 'remote_pdb']
-    right_cols = ['build_id', 'uuid']
-    middle_cols = sorted(all_keys - excluded - set(left_cols) - set(right_cols))
-    all_keys = left_cols + middle_cols + right_cols
-    
-    def flag(v, k):
-        if v is None: return '-'
-        if isinstance(v, bool): return '&#10003;' if v else '-'
-        if isinstance(v, list): return ', '.join(str(x) for x in v[:5]) + ('...' if len(v) > 5 else '')
-        if isinstance(v, dict):
-            if k in ('local_pdb', 'remote_pdb'):
-                return '&#10003;' if v.get('available') else '-'
-            return str(v)
-        return str(v)
-    
-    headers = ['File', 'Folder'] + all_keys
-    rows = ''
-    for f in all_files:
-        cells = [f'<td class="file-cell">{os.path.basename(f.get("file_path", ""))}</td>', f'<td class="folder-cell">{f.get("_folder", "")}</td>']
-        for k in all_keys:
-            v = f.get(k)
-            cells.append(f'<td>{flag(v, k)}</td>')
-        rows += f'<tr class="{"has-debug" if has_debug(f) else "no-debug"}">{"".join(cells)}</tr>'
-    
-    html = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Steam Depot Analysis</title>
-    <style>
-        body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin: 20px; background: #1a1a1a; color: #eee; }}
-        h1 {{ color: #fff; margin-bottom: 5px; }}
-        .stats {{ color: #888; margin-bottom: 15px; }}
-        .search-box {{ margin-bottom: 15px; }}
-        .search-box input {{ padding: 8px 12px; width: 300px; background: #333; border: 1px solid #444; color: #fff; border-radius: 4px; font-size: 13px; }}
-        .search-box input:focus {{ outline: none; border-color: #4caf50; }}
+        row_class = "has-debug" if has_debug(f) else "no-debug"
+        cells = [
+            f'<td class="file-cell">{os.path.basename(f.get("file_path", ""))}</td>',
+            f'<td>{f.get("app_name", "-")}</td>',
+            f'<td class="folder-cell">{f.get("_folder", "")}</td>',
+            f'<td>{"&#10003;" if f.get("has_debug_info") else "-"}</td>',
+            f'<td>{"&#10003;" if f.get("is_stripped") else "-"}</td>',
+            f'<td>{"&#10003;" if f.get("local_pdb", {}).get("available") else "-"}</td>',
+            f'<td>{"&#10003;" if f.get("remote_pdb", {}).get("available") else "-"}</td>',
+            f'<td>{f.get("build_id", "-")}</td>'
+        ]
+        rows += f'<tr class="{row_class}">{"".join(cells)}</tr>'
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Steam Depot Analysis</title><style>
+        body {{ font-family: sans-serif; background: #1a1a1a; color: #eee; margin: 20px; }}
         table {{ border-collapse: collapse; width: 100%; background: #252525; }}
-        th, td {{ padding: 8px 10px; text-align: left; border-bottom: 1px solid #333; font-size: 12px; white-space: nowrap; }}
-        th {{ background: #333; cursor: pointer; user-select: none; position: sticky; top: 0; }}
-        th:hover {{ background: #444; }}
-        tr:hover {{ background: #2a2a2a; }}
-        .file-cell {{ color: #4caf50; }}
-        .no-debug .file-cell {{ color: #ff9800; }}
-        tr.hidden {{ display: none; }}
-        .folder-cell {{ color: #666; font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }}
-    </style>
-</head>
-<body>
+        th, td {{ padding: 8px; text-align: left; border-bottom: 1px solid #333; font-size: 12px; }}
+        th {{ background: #333; }}
+        .has-debug {{ color: #4caf50; }}
+        .no-debug {{ color: #ff9800; }}
+        .folder-cell {{ color: #888; font-size: 11px; }}
+    </style></head><body>
     <h1>Steam Depot Analysis</h1>
-    <div class="stats">{data['total_files']} binaries in {data['total_directories']} folders</div>
-    <div class="search-box">
-        <input type="text" id="searchInput" placeholder="Search..." oninput="filterTable()">
-    </div>
-    <table id="table">
-        <thead>
-            <tr>
-                {"".join(f'<th onclick="sortTable(this.cellIndex)">{h}</th>' for h in headers)}
-            </tr>
-        </thead>
-        <tbody id="tbody">{rows}</tbody>
-    </table>
-    <script>
-        let sortAsc = true;
-        let sortCol = 0;
+    <div style="margin-bottom: 10px;">{data['total_files']} binaries found</div>
+    <table><thead><tr>{"".join(f"<th>{h}</th>" for h in headers)}</tr></thead><tbody>{rows}</tbody></table>
+    </body></html>"""
+    with open(html_path, 'w', encoding='utf-8') as f: f.write(html)
 
-        function filterTable() {{
-            const search = document.getElementById('searchInput').value.toLowerCase();
-            document.querySelectorAll('#tbody tr').forEach(row => {{
-                row.style.display = row.textContent.toLowerCase().includes(search) ? '' : 'none';
-            }});
-        }}
+# --- CLI Subcommands ---
 
-        function sortTable(col) {{
-            if (sortCol === col) sortAsc = !sortAsc;
-            else {{ sortAsc = true; sortCol = col; }}
-            const tbody = document.getElementById('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            rows.sort((a, b) => {{
-                const A = a.cells[col].textContent.trim();
-                const B = b.cells[col].textContent.trim();
-                const aNum = parseFloat(A), bNum = parseFloat(B);
-                if (!isNaN(aNum) && !isNaN(bNum) && aNum === bNum) return sortAsc ? A.localeCompare(B) : B.localeCompare(A);
-                if (!isNaN(aNum) && !isNaN(bNum)) return sortAsc ? aNum - bNum : bNum - aNum;
-                return sortAsc ? A.localeCompare(B, undefined, {{numeric: true}}) : B.localeCompare(A, undefined, {{numeric: true}});
-            }});
-            rows.forEach(r => tbody.appendChild(r));
-        }}
-    </script>
-</body>
-</html>'''
+def cmd_scrape(args):
+    config = load_config()
+    cache = load_cache()
+    app_info = load_app_info()
     
-    open(html_path, 'w', encoding='utf-8').write(html)
-    logger.info(f"HTML: {html_path}")
+    missing = []
+    apps_in_config = config.get("download", {})
+    
+    # Ensure we have names for all apps in config
+    for app_id in apps_in_config.keys():
+        app_id_str = str(app_id)
+        if app_id_str not in app_info:
+            app_info[app_id_str] = fetch_app_name(app_id)
+            save_app_info(app_info)
 
+    for app_id, depots in apps_in_config.items():
+        for depot_id in depots:
+            if str(depot_id) not in cache:
+                missing.append({"app_id": str(app_id), "depot_id": str(depot_id)})
+    
+    if missing:
+        generate_js_scraper(missing, cache)
+    else:
+        logger.info("All depots already in cache. No scraping needed.")
+
+def cmd_download(args):
+    config = load_config()
+    cache = load_cache()
+    download_depots(config, cache)
+
+def cmd_analyze(args):
+    analyze_depots()
+
+def cmd_all(args):
+    cmd_scrape(args)
+    # Check if scrape generated a new file, if so, we should probably stop
+    if os.path.exists(JS_OUTPUT_FILE) and time.time() - os.path.getmtime(JS_OUTPUT_FILE) < 5:
+        return
+    cmd_download(args)
+    cmd_analyze(args)
+
+# --- Main Entry Point ---
 
 def main():
+    check_dependencies()
+    
     parser = argparse.ArgumentParser(description="Steam Depot Tool")
-    parser.add_argument("--config", default=CONFIG_FILE, help="Config file")
-    parser.add_argument("--app", help="App ID")
-    parser.add_argument("--depot", help="Depot ID")
-    parser.add_argument("--username", help="Steam username")
-    parser.add_argument("--password", help="Steam password")
-    parser.add_argument("--branch", default="public", help="Branch name")
-    parser.add_argument("--headless", action="store_true", help="Headless browser")
-    parser.add_argument("--mode", choices=["scrape", "download", "analyze", "all"], default="all", help="Mode")
-    parser.add_argument("--html", action="store_true", help="Generate HTML from existing JSON")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    
+    subparsers.add_parser("scrape", help="Generate JS scraper for missing manifests")
+    subparsers.add_parser("download", help="Download manifests from Steam")
+    subparsers.add_parser("analyze", help="Analyze downloaded binaries")
+    subparsers.add_parser("all", help="Run scrape, download, and analyze in sequence")
+    
     args = parser.parse_args()
     
-    if args.html:
-        generate_html("analysis_results.json")
-        return
+    commands = {
+        "scrape": cmd_scrape,
+        "download": cmd_download,
+        "analyze": cmd_analyze,
+        "all": cmd_all
+    }
     
-    import yaml
-    
-    config = {}
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f) or {}
-    else:
-        logger.warning(f"Config file not found: {CONFIG_FILE}")
-    
-    username = args.username or config.get("username", "")
-    password = args.password or config.get("password", "")
-    branch = args.branch or config.get("branch", "public")
-    headless = args.headless or config.get("headless", False)
-    
-    downloads = {}
-    if args.app and args.depot:
-        downloads = {args.app: [args.depot]}
-    else:
-        downloads = config.get("download", {})
-    
-    logger.info("=" * 40)
-    logger.info("      Steam Depot Tool")
-    logger.info("=" * 40)
-    logger.info(f"Mode: {args.mode}")
-    logger.info(f"Apps: {len(downloads)}")
-    logger.info("=" * 40)
-    
-    downloader = DepotDownloader()
-    
-    all_manifests_to_download = []
-    
-    if args.mode in ("scrape", "download", "all"):
-        with SteamDBScraper() as scraper:
-            for app_id, depots in downloads.items():
-                for depot_id in depots:
-                    logger.info(f">>> App: {app_id} | Depot: {depot_id}")
-                    
-                    manifests = scraper.fetch_manifests(depot_id)
-                    if not manifests:
-                        logger.error(f"No manifests for Depot {depot_id}")
-                        continue
-                    
-                    branch_manifests = [m for m in manifests if m['branch'] == branch]
-                    if not branch_manifests:
-                        logger.error(f"No manifests for branch '{branch}'")
-                        continue
-                    
-                    logger.info(f"Found {len(branch_manifests)} manifests")
-                    for m in branch_manifests:
-                        all_manifests_to_download.append({
-                            'app_id': app_id,
-                            'depot_id': depot_id,
-                            'manifest_id': m['manifest_id']
-                        })
-
-    # Now that the browser is closed, start the downloads
-    if args.mode in ("download", "all") and all_manifests_to_download:
-        logger.info("=" * 40)
-        logger.info(f"Starting batch download of {len(all_manifests_to_download)} manifests...")
-        logger.info("=" * 40)
-        
-        for item in all_manifests_to_download:
-            downloader.download(
-                item['app_id'], 
-                item['depot_id'], 
-                item['manifest_id'], 
-                username, 
-                password
-            )
-    
-    if args.mode in ("analyze", "all"):
-        analyze()
-
+    commands[args.command](args)
 
 if __name__ == "__main__":
     main()

@@ -14,4 +14,6 @@ pdbwalker.exe
 symwalker
 symwalker.exe
 steamdb_profile
-manifest_cache.json
+manifest_cache/
+scrape.js
+app_info.json

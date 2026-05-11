@@ -1,12 +1,28 @@
-steamdepoter.log
-uv.lock
-manifest_downloads/**
-config.backup.yaml
-__pycache__
+# .NET build artifacts
+bin/
+obj/
+SteamDepotDumper/bin/
+SteamDepotDumper/obj/
+
+# Sensitive session data
+guard.json
+SteamDepotDumper/guard.json
+
+# Output dumps
+dump.json
+SteamDepotDumper/dump.json
 analysis_results.json
 analysis_results.html
-tmp
-user_data/
+
+# Logs and temp
+steamdepoter.log
+tmp/
+__pycache__/
+manifest_downloads/
+
+uv.lock
+config.backup.yaml
+steamdb_cookies.json
 depots
 DepotDownloader.exe
 pdbwalker

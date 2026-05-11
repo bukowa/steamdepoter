@@ -4,13 +4,18 @@ Scrapes SteamDB for depot manifests, downloads game files, and analyzes binaries
 
 **Problem:** Want to analyze debug info in Steam games? This tool downloads specific depots and tells you which binaries have DWARF/stripped symbols, security features (NX, RELRO, canary), and more.
 
+## Requirements
+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (python package manager)
+- Steam account (for DepotDownloader)
+
 ## Quick Start
 
 1. **Setup dependencies:**
    - **Windows:** `powershell ./setup-deps.ps1`
    - **Linux/macOS:** `chmod +x setup-deps.sh && ./setup-deps.sh`
    
-   *This installs `uv`, `DepotDownloader`, `symwalker`, `pdbwalker`, and Playwright browsers.*
+   *This installs `DepotDownloader`, `symwalker`, `pdbwalker`, and Playwright browsers.*
 
 2. **Configure:**
    Edit `config.yaml` with your Steam username and desired App/Depot IDs.
@@ -63,9 +68,3 @@ download:
 
 - `analysis_results.json`: Raw analysis data.
 - `analysis_results.html`: Interactive, sortable, and searchable HTML report.
-
-## Requirements
-
-- Python 3.14+
-- [uv](https://github.com/astral-sh/uv) (installed automatically by setup scripts)
-- Steam account (for DepotDownloader)

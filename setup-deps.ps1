@@ -10,6 +10,13 @@ function Download-Bin {
 
 Write-Host "`n--- Windows Dependency Setup ---" -ForegroundColor Yellow
 
+# 0. Check for uv (Required)
+if (!(Get-Command "uv" -ErrorAction SilentlyContinue)) {
+    Write-Host "[!] Error: 'uv' is required but not found." -ForegroundColor Red
+    Write-Host "    Please install it from: https://astral.sh/uv" -ForegroundColor White
+    exit 1
+}
+
 # 1. DepotDownloader (Zip) - Extracting ONLY the executable
 Download-Bin "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-windows-x64.zip" "DepotDownloader.zip"
 Write-Host "    Extracting DepotDownloader.exe..." -ForegroundColor Gray

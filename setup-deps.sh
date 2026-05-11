@@ -12,6 +12,13 @@ NC='\033[0m'
 
 echo -e "\n${YELLOW}--- Linux/macOS Dependency Setup ---${NC}"
 
+# 0. Check for uv (Required)
+if ! command -v uv &> /dev/null; then
+    echo -e "${RED}[!] Error: 'uv' is required but not found.${NC}"
+    echo -e "    Please install it from: https://astral.sh/uv"
+    exit 1
+fi
+
 # 1. DepotDownloader - Extract ONLY the binary to avoid overwriting LICENSE
 echo -e "${CYAN}[*] Downloading DepotDownloader...${NC}"
 curl -L -# -f -o "DepotDownloader.zip" "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-linux-x64.zip"

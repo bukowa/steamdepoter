@@ -3,11 +3,19 @@ import os, sys, json, subprocess, argparse, logging, time
 from datetime import datetime
 from collections import defaultdict
 
+# --- Paths Configuration ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROFILE_DIR = os.path.join(BASE_DIR, "steamdb_profile")
+MANIFEST_CACHE = os.path.join(BASE_DIR, "manifest_cache.json")
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "manifest_downloads")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.yaml")
+LOG_FILE = os.path.join(BASE_DIR, "steamdepoter.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("steamdepoter.log", encoding="utf-8"),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -15,76 +23,239 @@ logger = logging.getLogger(__name__)
 
 
 class SteamDBScraper:
-    def __init__(self, headless=False):
-        self.headless = headless
+    """
+    Scrapes SteamDB manifests using a persistent browser profile.
+    """
+
+    # Simple detection: If 'Sign out' text is on the page, we are logged in.
+    LOGGED_IN_SELECTOR = "text='Sign out'"
+    LOGIN_TIMEOUT_MS = 300_000
+
+    def __init__(self):
         from playwright.sync_api import sync_playwright
         from bs4 import BeautifulSoup
         self.sync_playwright = sync_playwright
         self.BeautifulSoup = BeautifulSoup
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        self._playwright = None
+        self._context = None
+        self._page = None
+        self._logged_in_verified = False
+        self._cache = self._load_cache()
+
+    def _load_cache(self):
+        if os.path.exists(MANIFEST_CACHE):
+            try:
+                with open(MANIFEST_CACHE, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load manifest cache: {e}")
+        return {}
+
+    def _save_cache(self):
+        try:
+            with open(MANIFEST_CACHE, "w") as f:
+                json.dump(self._cache, f, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to save manifest cache: {e}")
+
+    def __enter__(self):
+        return self
+
+    def _ensure_browser(self):
+        if self._page:
+            return
+
+        import random
+        self._playwright = self.sync_playwright().start()
+        
+        # Randomize viewport slightly to avoid static fingerprints
+        random_width = 1280 + random.randint(0, 100)
+        random_height = 800 + random.randint(0, 100)
+        
+        logger.info("Starting local scraper instance...")
+        try:
+            # Try connection first
+            logger.info("Attempting to connect to a real Chrome instance on 127.0.0.1:9222...")
+            self._browser = self._playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            self._context = self._browser.contexts[0]
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+            logger.info("SUCCESS: Connected to your real Chrome browser!")
+            self._is_connected_to_real = True
+        except Exception:
+            logger.info("Starting isolated browser context...")
+            self._context = self._playwright.chromium.launch_persistent_context(
+                PROFILE_DIR,
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--start-maximized"
+                ],
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": random_width, "height": random_height},
+                locale="en-US",
+                timezone_id="America/New_York"
+            )
+            self._page = self._context.new_page()
+            self._is_connected_to_real = False
+        
+        self._page.set_default_timeout(60000)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if hasattr(self, "_is_connected_to_real") and self._is_connected_to_real:
+                if self._playwright:
+                    self._playwright.stop()
+            else:
+                if self._context:
+                    self._context.close()
+                if self._playwright:
+                    self._playwright.stop()
+        except Exception:
+            pass
+
+    def _is_logged_in(self) -> bool:
+        if self._page.is_closed():
+            return False
+        try:
+            return self._page.locator(self.LOGGED_IN_SELECTOR).count() > 0
+        except Exception:
+            return False
+
+    def _ensure_logged_in(self) -> bool:
+        if self._logged_in_verified:
+            return True
+
+        if self._page.is_closed():
+            return False
+
+        # Check current page first
+        if self._is_logged_in():
+            self._logged_in_verified = True
+            return True
+
+        # Go to homepage to check
+        logger.info("Checking SteamDB login status...")
+        try:
+            self._page.goto("https://steamdb.info/", wait_until="domcontentloaded")
+            if self._is_logged_in():
+                logger.info("SteamDB: already logged in via saved profile.")
+                self._logged_in_verified = True
+                return True
+        except Exception:
+            pass
+
+        logger.warning(
+            "SteamDB: NOT logged in. Please log in manually in the browser window now."
+        )
+        
+        # Wait for any of the logged-in selectors to appear
+        start_time = time.time()
+        while time.time() - start_time < (self.LOGIN_TIMEOUT_MS / 1000):
+            if self._page.is_closed():
+                logger.error("Browser was closed during login.")
+                return False
+            if self._is_logged_in():
+                logger.info("SteamDB: login detected!")
+                self._logged_in_verified = True
+                return True
+            time.sleep(1)
+
+        logger.error("SteamDB: login timeout.")
+        return False
 
     def fetch_manifests(self, depot_id):
-        url = f"https://steamdb.info/depot/{depot_id}/manifests/"
-        
-        with self.sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless)
-            page = browser.new_page()
+        # Check cache first
+        depot_id_str = str(depot_id)
+        if depot_id_str in self._cache:
+            logger.info(f"Using cached manifests for Depot {depot_id}")
+            return self._cache[depot_id_str]
 
-            logger.info(f"Navigating to {url}...")
-            page.goto(url, wait_until="domcontentloaded")
-            
-            logger.info("Waiting for manifests table to load...")
-            
-            try:
-                page.wait_for_selector("tr[data-branch]", timeout=60000)
-                logger.info("Table loaded successfully!")
-            except Exception as e:
-                logger.error(f"Failed to find manifests table: {e}")
-                browser.close()
-                return []
-                
-            html_content = page.content()
-            browser.close()
-            
-            return self._parse_html(html_content)
-            
-    def _parse_html(self, html):
-        soup = self.BeautifulSoup(html, 'html.parser')
-        manifests = []
+        # Cache miss - we need the browser now
+        self._ensure_browser()
+
+        if self._page.is_closed():
+            return []
+
+        url = f"https://steamdb.info/depot/{depot_id}/manifests/"
+
+        self._ensure_logged_in()
         
-        for row in soup.find_all('tr'):
-            branch = row.get('data-branch')
+        if self._page.is_closed():
+            return []
+
+        logger.info(f"Navigating to {url}...")
+        # Random delay to seem more human
+        time.sleep(2)
+        
+        self._page.goto(url, wait_until="domcontentloaded")
+        
+        # Give Cloudflare background checks a chance to settle (from BQL guide)
+        logger.info("Waiting 5s for background challenges to settle...")
+        time.sleep(5)
+
+        logger.info("Waiting for manifests table to load...")
+        try:
+            self._page.wait_for_selector("tr[data-branch]", timeout=60_000)
+            logger.info("Table loaded successfully!")
+        except Exception as e:
+            logger.error(f"Failed to find manifests table: {e}")
+            return []
+
+        # Small delay before grabbing content to allow any JS to settle
+        time.sleep(1)
+        html_content = self._page.content()
+
+        manifests = self._parse_html(html_content)
+        
+        if manifests:
+            self._cache[depot_id_str] = manifests
+            self._save_cache()
+            
+        return manifests
+
+    def _parse_html(self, html):
+        soup = self.BeautifulSoup(html, "html.parser")
+        manifests = []
+
+        for row in soup.find_all("tr"):
+            branch = row.get("data-branch")
             if not branch:
                 continue
-                
-            time_td = row.find('td', class_='timeago')
+
+            time_td = row.find("td", class_="timeago")
             if not time_td:
                 continue
-            date_str = time_td.get('data-time')
-            
-            manifest_td = row.find('td', class_='tabular-nums')
+            date_str = time_td.get("data-time")
+
+            manifest_td = row.find("td", class_="tabular-nums")
             if not manifest_td:
                 continue
-                
-            a_tag = manifest_td.find('a')
+
+            a_tag = manifest_td.find("a")
             if not a_tag:
                 continue
-                
+
             manifest_id = a_tag.text.strip()
-            
+
             manifests.append({
-                'branch': branch,
-                'date': date_str,
-                'manifest_id': manifest_id
+                "branch": branch,
+                "date": date_str,
+                "manifest_id": manifest_id,
             })
-            
+
         return manifests
 
 
 class DepotDownloader:
-    def __init__(self, path="DepotDownloader", base_dest_dir="manifest_downloads"):
+    def __init__(self, path=DUMPER_EXE):
         self.path = path
-        self.base_dest_dir = base_dest_dir
-        self.cache_file = os.path.join(base_dest_dir, "download_cache.json")
+        self.base_dest_dir = DOWNLOAD_DIR
+        self.cache_file = os.path.join(self.base_dest_dir, "download_cache.json")
         self.cache = self._load_cache()
 
     def _load_cache(self):
@@ -340,7 +511,7 @@ def generate_html(json_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Steam Depot Tool")
-    parser.add_argument("--config", default="config.yaml", help="Config file")
+    parser.add_argument("--config", default=CONFIG_FILE, help="Config file")
     parser.add_argument("--app", help="App ID")
     parser.add_argument("--depot", help="Depot ID")
     parser.add_argument("--username", help="Steam username")
@@ -358,9 +529,11 @@ def main():
     import yaml
     
     config = {}
-    if os.path.exists(args.config):
-        with open(args.config, 'r', encoding='utf-8') as f:
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f) or {}
+    else:
+        logger.warning(f"Config file not found: {CONFIG_FILE}")
     
     username = args.username or config.get("username", "")
     password = args.password or config.get("password", "")
@@ -380,29 +553,48 @@ def main():
     logger.info(f"Apps: {len(downloads)}")
     logger.info("=" * 40)
     
-    scraper = SteamDBScraper(headless=headless)
     downloader = DepotDownloader()
     
+    all_manifests_to_download = []
+    
     if args.mode in ("scrape", "download", "all"):
-        for app_id, depots in downloads.items():
-            for depot_id in depots:
-                logger.info(f">>> App: {app_id} | Depot: {depot_id}")
-                
-                manifests = scraper.fetch_manifests(depot_id)
-                if not manifests:
-                    logger.error(f"No manifests for Depot {depot_id}")
-                    continue
-                
-                branch_manifests = [m for m in manifests if m['branch'] == branch]
-                if not branch_manifests:
-                    logger.error(f"No manifests for branch '{branch}'")
-                    continue
-                
-                logger.info(f"Found {len(branch_manifests)} manifests")
-                
-                if args.mode in ("download", "all"):
+        with SteamDBScraper() as scraper:
+            for app_id, depots in downloads.items():
+                for depot_id in depots:
+                    logger.info(f">>> App: {app_id} | Depot: {depot_id}")
+                    
+                    manifests = scraper.fetch_manifests(depot_id)
+                    if not manifests:
+                        logger.error(f"No manifests for Depot {depot_id}")
+                        continue
+                    
+                    branch_manifests = [m for m in manifests if m['branch'] == branch]
+                    if not branch_manifests:
+                        logger.error(f"No manifests for branch '{branch}'")
+                        continue
+                    
+                    logger.info(f"Found {len(branch_manifests)} manifests")
                     for m in branch_manifests:
-                        downloader.download(app_id, depot_id, m['manifest_id'], username, password)
+                        all_manifests_to_download.append({
+                            'app_id': app_id,
+                            'depot_id': depot_id,
+                            'manifest_id': m['manifest_id']
+                        })
+
+    # Now that the browser is closed, start the downloads
+    if args.mode in ("download", "all") and all_manifests_to_download:
+        logger.info("=" * 40)
+        logger.info(f"Starting batch download of {len(all_manifests_to_download)} manifests...")
+        logger.info("=" * 40)
+        
+        for item in all_manifests_to_download:
+            downloader.download(
+                item['app_id'], 
+                item['depot_id'], 
+                item['manifest_id'], 
+                username, 
+                password
+            )
     
     if args.mode in ("analyze", "all"):
         analyze()

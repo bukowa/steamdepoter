@@ -217,12 +217,20 @@ def generate_html(json_path):
     all_keys = set()
     for f in all_files:
         all_keys.update(f.keys())
-    all_keys = sorted(all_keys - {'_folder', 'file_path', 'debug_sections', 'debuginfod_url', 'debug_file_path', 'file_modified'})
+    excluded = {'_folder', 'file_path', 'debug_sections', 'debuginfod_url', 'debug_file_path', 'file_modified'}
+    left_cols = ['has_debug_info', 'is_stripped', 'dsym_bundle', 'local_pdb', 'remote_pdb']
+    right_cols = ['build_id', 'uuid']
+    middle_cols = sorted(all_keys - excluded - set(left_cols) - set(right_cols))
+    all_keys = left_cols + middle_cols + right_cols
     
     def flag(v, k):
         if v is None: return '-'
         if isinstance(v, bool): return '&#10003;' if v else '-'
         if isinstance(v, list): return ', '.join(str(x) for x in v[:5]) + ('...' if len(v) > 5 else '')
+        if isinstance(v, dict):
+            if k in ('local_pdb', 'remote_pdb'):
+                return '&#10003;' if v.get('available') else '-'
+            return str(v)
         return str(v)
     
     headers = ['File', 'Folder'] + all_keys
@@ -290,7 +298,10 @@ def generate_html(json_path):
             rows.sort((a, b) => {{
                 const A = a.cells[col].textContent.trim();
                 const B = b.cells[col].textContent.trim();
-                return sortAsc ? A.localeCompare(B) : B.localeCompare(A);
+                const aNum = parseFloat(A), bNum = parseFloat(B);
+                if (!isNaN(aNum) && !isNaN(bNum) && aNum === bNum) return sortAsc ? A.localeCompare(B) : B.localeCompare(A);
+                if (!isNaN(aNum) && !isNaN(bNum)) return sortAsc ? aNum - bNum : bNum - aNum;
+                return sortAsc ? A.localeCompare(B, undefined, {{numeric: true}}) : B.localeCompare(A, undefined, {{numeric: true}});
             }});
             rows.forEach(r => tbody.appendChild(r));
         }}

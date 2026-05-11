@@ -28,7 +28,7 @@ class SteamDBScraper:
         with self.sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             page = browser.new_page()
-            
+
             logger.info(f"Navigating to {url}...")
             page.goto(url, wait_until="domcontentloaded")
             
@@ -84,12 +84,35 @@ class DepotDownloader:
     def __init__(self, path="DepotDownloader", base_dest_dir="manifest_downloads"):
         self.path = path
         self.base_dest_dir = base_dest_dir
+        self.cache_file = os.path.join(base_dest_dir, "download_cache.json")
+        self.cache = self._load_cache()
+
+    def _load_cache(self):
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+        return {}
+
+    def _save_cache(self):
+        with open(self.cache_file, 'w', encoding='utf-8') as f:
+            json.dump(self.cache, f, indent=2)
+
+    def _cache_key(self, app_id, depot_id, manifest_id):
+        return f"{app_id}-{depot_id}-{manifest_id}"
 
     def download(self, app_id, depot_id, manifest_id, username, password=None):
+        key = self._cache_key(app_id, depot_id, manifest_id)
+        if key in self.cache:
+            logger.info(f"Skipping (cached): {manifest_id}")
+            return True
+
         logger.info(f"Downloading manifest: {manifest_id}")
-        
+
         dest_dir = os.path.join(self.base_dest_dir, str(app_id), str(depot_id), str(manifest_id))
-        
+
         cmd = [
             self.path,
             "-app", str(app_id),
@@ -99,7 +122,7 @@ class DepotDownloader:
             "-dir", dest_dir,
             "-remember-password"
         ]
-        
+
         if password:
             cmd.extend(["-password", password])
 
@@ -107,6 +130,8 @@ class DepotDownloader:
             try:
                 subprocess.run(cmd, check=True)
                 logger.info(f"Downloaded: {manifest_id}")
+                self.cache[key] = {"downloaded_at": datetime.now().isoformat()}
+                self._save_cache()
                 return True
             except subprocess.CalledProcessError as e:
                 logger.warning(f"Attempt {attempt}/5 failed: {e}")

@@ -1,28 +1,12 @@
-# .NET build artifacts
-bin/
-obj/
-SteamDepotDumper/bin/
-SteamDepotDumper/obj/
-
-# Sensitive session data
-guard.json
-SteamDepotDumper/guard.json
-
-# Output dumps
-dump.json
-SteamDepotDumper/dump.json
+steamdepoter.log
+uv.lock
+manifest_downloads/**
+config.backup.yaml
+__pycache__
 analysis_results.json
 analysis_results.html
-
-# Logs and temp
-steamdepoter.log
-tmp/
-__pycache__/
-manifest_downloads/
-
-uv.lock
-config.backup.yaml
-steamdb_cookies.json
+tmp
+user_data/
 depots
 DepotDownloader.exe
 pdbwalker

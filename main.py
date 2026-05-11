@@ -268,20 +268,60 @@ def download_depots(config, cache):
 # --- 5. Step: Analyze ---
 
 def analyze_depots():
-    """Runs symwalker and pdbwalker on downloaded files."""
-    if not os.path.isdir(DOWNLOAD_DIR): return
+    """Runs symwalker and pdbwalker on downloaded files with progress feedback per depot."""
+    if not os.path.isdir(DOWNLOAD_DIR): 
+        logger.warning(f"Download directory not found: {DOWNLOAD_DIR}")
+        return
+
+    # Find all leaf manifest folders to show progress
+    manifest_folders = []
+    for app_id in os.listdir(DOWNLOAD_DIR):
+        app_path = os.path.join(DOWNLOAD_DIR, app_id)
+        if not os.path.isdir(app_path): continue
+        for depot_id in os.listdir(app_path):
+            depot_path = os.path.join(app_path, depot_id)
+            if not os.path.isdir(depot_path): continue
+            for manifest_id in os.listdir(depot_path):
+                m_path = os.path.join(depot_path, manifest_id)
+                if os.path.isdir(m_path):
+                    manifest_folders.append(m_path)
+
+    if not manifest_folders:
+        logger.warning("No manifest folders found to analyze.")
+        return
 
     results = []
-    logger.info("Analyzing binaries...")
-    
-    try:
-        sym = subprocess.run(['symwalker', DOWNLOAD_DIR, '--show-stripped', '--check-remote', '--security', '--json'], capture_output=True, text=True)
-        if sym.returncode == 0: results.extend(json.loads(sym.stdout))
+    total = len(manifest_folders)
+    logger.info(f"Analyzing {total} manifest folders...")
+
+    for i, m_path in enumerate(manifest_folders, 1):
+        rel_path = os.path.relpath(m_path, DOWNLOAD_DIR)
+        print(f"[{i}/{total}] Analyzing {rel_path}...", end='\r')
         
-        pdb = subprocess.run(['pdbwalker', DOWNLOAD_DIR, '--check-remote', '--json'], capture_output=True, text=True)
-        if pdb.returncode == 0: results.extend([json.loads(l) for l in pdb.stdout.strip().split('\n') if l.strip()])
-    except Exception as e:
-        logger.error(f"Analysis tool error: {e}")
+        try:
+            # Run symwalker on the folder (let it do the recursive scan)
+            sym = subprocess.run(['symwalker', m_path, '--show-stripped', '--check-remote', '--security', '--json'], 
+                                 capture_output=True, text=True)
+            if sym.returncode == 0 and sym.stdout.strip():
+                try:
+                    results.extend(json.loads(sym.stdout))
+                except json.JSONDecodeError:
+                    pass
+            
+            # Run pdbwalker on the folder
+            pdb = subprocess.run(['pdbwalker', m_path, '--check-remote', '--json'], 
+                                 capture_output=True, text=True)
+            if pdb.returncode == 0 and pdb.stdout.strip():
+                try:
+                    for line in pdb.stdout.strip().split('\n'):
+                        if line.strip():
+                            results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        except Exception as e:
+            logger.error(f"\nError analyzing {rel_path}: {e}")
+
+    print(f"\nAnalysis of {total} folders complete.")
 
     app_info = load_app_info()
     for entry in results:

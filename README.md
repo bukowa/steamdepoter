@@ -2,47 +2,42 @@
 
 ## Requirements
 
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) (python package manager)
-- Steam account (for DepotDownloader / SteamDB)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- Steam account
 
-## Quick Start
+## Setup
 
-1. **Setup dependencies:**
-   - **Windows:** `powershell ./setup-deps.ps1`
-   - **Linux/macOS:** `chmod +x setup-deps.sh && ./setup-deps.sh`
-   
-   *This installs `DepotDownloader`, `symwalker`, `pdbwalker`, and Playwright browsers.*
-
-2. **Configure:**
-   Edit `config.yaml` with your Steam username and desired App/Depot IDs.
-
-3. **Run:**
-   ```bash
-   uv run main.py
-   ```
-
-## Features
-
-- Fetch depot manifests from SteamDB automatically
-- Download depot files via DepotDownloader
-- Analyze ELF/Mach-O binaries with [symwalker](https://github.com/bukforks/symwalker)
-- Analyze PE (Windows) binaries with [pdbwalker](https://github.com/bukforks/pdbwalker)
-- Generate an interactive HTML report
+```powershell
+./setup-deps.ps1
+```
 
 ## Usage
 
+### 1. Generate Scraper
+Configure your App/Depot IDs in `config.yaml`, then run:
 ```bash
-# Full pipeline: scrape -> download -> analyze
-uv run main.py
+uv run main.py scrape
+```
 
-# Download only
-uv run main.py --mode download
+### 2. Manual Scrape
+1. Open [steamdb.info](https://steamdb.info) in your browser (make sure you are logged in).
+2. Open Browser Console (F12).
+3. Paste contents of `scrape.js` and press Enter.
+4. Move the downloaded `manifest_cache.json` to the `manifest_cache/` folder.
 
-# Analyze only (existing files)
-uv run main.py --mode analyze
+### 3. Download
+```bash
+uv run main.py download
+```
 
-# Regenerate HTML report from JSON data
-uv run main.py --html
+### 4. Analyze
+```bash
+uv run main.py analyze
+```
+
+*Or run everything in sequence (after step 2):*
+```bash
+uv run main.py all
 ```
 
 ## Configuration
@@ -51,16 +46,8 @@ Edit `config.yaml`:
 
 ```yaml
 username: "your_steam_username"
-password: ""  # recommended to leave empty (prompted at runtime)
 branch: "public"
 download:
-  "712100":  # App ID (e.g., Project Zomboid)
-    - "814262"  # Depot ID (only include depots with binaries)
+  "712100":   # App ID
+    - "814262" # Depot ID
 ```
-
-**Tip:** Only include depot IDs that contain binary files (like `.exe`, `.dll`, `.so`). Skipping asset-only depots (textures, audio) saves significant time and space.
-
-## Output
-
-- `analysis_results.json`: Raw analysis data.
-- `analysis_results.html`: Interactive, sortable, and searchable HTML report.

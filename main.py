@@ -114,10 +114,11 @@ def generate_js_scraper(depots_to_scrape, existing_cache):
 
     let successCount = 0;
     let failCount = 0;
+    let failedDepots = [];
 
     for (const {{app_id, depot_id}} of depots) {{
         const url = `https://steamdb.info/depot/${{depot_id}}/manifests/`;
-        console.log(`[*] Processing ${{depot_id}} (app ${{app_id}})...`);
+        console.log(`[*] Processing ${{depot_id}}...`);
         
         const popup = window.open(url, '_blank', 'width=800,height=600');
         
@@ -166,13 +167,14 @@ def generate_js_scraper(depots_to_scrape, existing_cache):
 
         }} catch (err) {{
             console.error(`  -> ERROR for ${{depot_id}}:`, err);
+            failedDepots.push(depot_id);
             failCount++;
         }}
         
         popup.close();
         
         const nextDelay = Math.floor(Math.random() * 5000) + 5000;
-        console.log(`[*] Waiting ${{nextDelay}}ms before next...`);
+        console.log(`[*] Waiting ${{nextDelay}}ms...`);
         await delay(nextDelay); 
     }}
 
@@ -186,8 +188,13 @@ def generate_js_scraper(depots_to_scrape, existing_cache):
     console.log("%c========================================", "color: white; font-weight: bold;");
     console.log(`%cFINISHED! Success: ${{successCount}}, Errors: ${{failCount}}`, successCount > 0 ? "color: green;" : "color: red;");
     if (failCount > 0) {{
-        console.log("%c[!] Some depots could not be scraped (e.g. due to Cloudflare).", "color: yellow;");
-        console.log("%cSTRATEGY: Save the downloaded file to your project and run 'uv run main.py scrape' again.", "color: yellow; font-weight: bold;");
+        console.log(`%c[!] Failed depots: ${{failedDepots.join(", ")}}`, "color: red;");
+        console.log("%cSTRATEGY for incomplete scrape:", "color: yellow; font-weight: bold;");
+        console.log("%c1. Move the downloaded 'manifest_cache.json' to your 'manifest_cache/' folder.", "color: yellow;");
+        console.log("%c2. Run 'uv run main.py scrape' AGAIN to REGENERATE the script for missing depots only.", "color: yellow;");
+        console.log("%c3. Paste the NEW script into this console to continue.", "color: yellow;");
+    }} else {{
+        console.log("%c[+] All depots scraped successfully! Move the file to 'manifest_cache/' and proceed.", "color: lightgreen;");
     }}
     console.log("%c========================================", "color: white; font-weight: bold;");
 }})();

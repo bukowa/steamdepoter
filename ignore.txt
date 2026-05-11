@@ -1,8 +1,0 @@
-Chromium Embedded Framework.framework
-QuincyKit.framework
-cef Helper.app
-cef Helper NP
-cef Helper EH
-cef_process.app
-libsteam_api.so
-libsteam_api.dylib

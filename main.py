@@ -155,24 +155,14 @@ def run_pdbwalker(directory):
     return []
 
 
-def ignore_path(path, lst):
-    pl = path.lower()
-    return any(p.lower() in pl for p in lst)
-
-def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignore_file="ignore.txt"):
+def analyze(scan_dir="manifest_downloads", output="analysis_results.json"):
     if not os.path.isdir(scan_dir):
         logger.error(f"Directory not found: {scan_dir}")
         return
-    
-    ign = []
-    if os.path.isfile(ignore_file):
-        ign = [l.strip() for l in open(ignore_file, encoding='utf-8') if l.strip() and not l.startswith('#')]
-    
+
     logger.info(f"Scanning: {scan_dir}")
-    if ign: logger.info(f"Ignoring: {len(ign)} patterns")
-    
+
     all_results = []
-    
     logger.info("Running symwalker (ELF/Mach-O)...")
     all_results.extend(run_symwalker(scan_dir))
     
@@ -183,7 +173,6 @@ def analyze(scan_dir="manifest_downloads", output="analysis_results.json", ignor
     total = 0
     for entry in all_results:
         fp = entry.get('file_path', '')
-        if ignore_path(fp, ign): continue
         parent = os.path.dirname(fp)
         dirs[os.path.relpath(parent, scan_dir)].append(entry)
         total += 1

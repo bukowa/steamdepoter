@@ -279,3 +279,78 @@ class DepotsTab(BaseTab):
                 QMessageBox.information(self, "Success", "Depot deleted successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Delete Depot")
+
+
+class ManifestsTab(BaseTab):
+
+    def get_service(self):
+        return ManifestService(self.session)
+
+    def refresh_data(self) -> None:
+        self.tree_view.clear()
+        self.tree_view.setHeaderLabels(["Manifest ID", "Depot ID", "Date"])
+        
+        service = self.get_service()
+        manifests = service.get_all_manifests()
+        
+        for m in manifests:
+            item = QTreeWidgetItem(self.tree_view)
+            item.setText(0, str(m.manifest_id))
+            item.setText(1, str(m.depot_id))
+            item.setText(2, str(m.date_str))
+            item.setData(0, Qt.ItemDataRole.UserRole, m)
+
+        for i in range(self.tree_view.columnCount()):
+            self.tree_view.resizeColumnToContents(i)
+
+    def on_add(self) -> None:
+        pass
+
+    def on_delete(self) -> None:
+        pass
+
+
+class ManifestFilesTab(BaseTab):
+
+    def get_service(self):
+        return ManifestService(self.session)
+
+    def init_ui(self) -> None:
+        super().init_ui()
+        self.tree_view.itemExpanded.connect(self.on_item_expanded)
+
+    def refresh_data(self) -> None:
+        self.tree_view.clear()
+        self.tree_view.setHeaderLabels(["Manifest / File", "Size"])
+        
+        service = self.get_service()
+        manifests = service.get_all_manifests()
+        
+        for m in manifests:
+            item = QTreeWidgetItem(self.tree_view)
+            item.setText(0, f"📄 {m.manifest_id} ({m.date_str})")
+            item.setData(0, Qt.ItemDataRole.UserRole, m)
+            # Add a placeholder item to allow expansion
+            QTreeWidgetItem(item)
+
+    def on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        # Check if already populated (has more than one child or placeholder)
+        if item.childCount() > 1:
+            return
+
+        # Remove placeholder
+        placeholder = item.child(0)
+        item.removeChild(placeholder)
+
+        manifest = item.data(0, Qt.ItemDataRole.UserRole)
+        if not manifest:
+            return
+
+        service = self.get_service()
+        files = service.get_files_by_manifest_id(str(manifest.manifest_id))
+        
+        for f in files:
+            file_item = QTreeWidgetItem(item)
+            file_item.setText(0, f.name)
+            file_item.setText(1, str(f.size))
+            file_item.setData(0, Qt.ItemDataRole.UserRole, f)

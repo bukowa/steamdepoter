@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QVBoxLayout, 
 from PyQt6.QtCore import Qt
 
 from src.db import Database
-from src.gui.tabs import GamesTab, DepotsTab
+from src.gui.tabs import GamesTab, DepotsTab, ManifestsTab, ManifestFilesTab
 from src.gui.console import ConsolePanel
 from src.gui.dialogs import SettingsDialog
 
@@ -37,13 +37,19 @@ class MainWindow(QMainWindow):
 
         self.games_tab = GamesTab(self.session, self.console, self.db)
         self.depots_tab = DepotsTab(self.session, self.console, self.db)
+        self.manifests_tab = ManifestsTab(self.session, self.console, self.db)
+        self.files_tab = ManifestFilesTab(self.session, self.console, self.db)
 
         # Connect signals for automatic refresh
         self.games_tab.data_changed.connect(self.refresh_all_tabs)
         self.depots_tab.data_changed.connect(self.refresh_all_tabs)
+        self.manifests_tab.data_changed.connect(self.refresh_all_tabs)
+        self.files_tab.data_changed.connect(self.refresh_all_tabs)
 
         self.tabs.addTab(self.games_tab, "Games")
         self.tabs.addTab(self.depots_tab, "Depots")
+        self.tabs.addTab(self.manifests_tab, "Manifests")
+        self.tabs.addTab(self.files_tab, "Manifest Files")
 
         splitter.addWidget(self.tabs)
         splitter.addWidget(self.console)
@@ -58,6 +64,8 @@ class MainWindow(QMainWindow):
         self.session.expire_all()
         self.games_tab.refresh_data()
         self.depots_tab.refresh_data()
+        self.manifests_tab.refresh_data()
+        self.files_tab.refresh_data()
 
     def init_menu(self):
         menubar = self.menuBar()

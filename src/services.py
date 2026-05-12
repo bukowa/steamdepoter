@@ -96,6 +96,19 @@ class DepotService(BaseService):
 class ManifestService(BaseService):
     """Service for handling Steam Manifests."""
 
+    def get_all_manifests(self) -> List[Manifest]:
+        return self._get_all(Manifest)
+
+    def get_files_by_manifest_id(self, manifest_id: str) -> List[ManifestFile]:
+        """Fetch files for a specific manifest."""
+        try:
+            return self.session.query(ManifestFile).filter(ManifestFile.manifest_id == manifest_id).all()
+        except SQLAlchemyError as e:
+            raise DatabaseError(f"Failed to fetch files for manifest {manifest_id}: {str(e)}")
+
+    def get_all_manifest_files(self) -> List[ManifestFile]:
+        return self._get_all(ManifestFile)
+
     def save_manifests(self, app_id: str, manifests: dict) -> None:
         """
         Saves or updates manifests and their files for a given app.

@@ -4,6 +4,8 @@
 class SteamDepoterError(Exception):
     """Base exception for all SteamDepoter errors."""
 
+    category: str = "error"
+
     def serialize(self) -> dict:
         """Serialize exception to a structured format.
 
@@ -13,7 +15,7 @@ class SteamDepoterError(Exception):
         return {
             "type": self.__class__.__name__,
             "message": str(self),
-            "category": "error",
+            "category": self.category,
         }
 
     def get_user_message(self) -> str:
@@ -28,34 +30,22 @@ class SteamDepoterError(Exception):
 class DatabaseError(SteamDepoterError):
     """Database operation failed."""
 
-    def serialize(self) -> dict:
-        result = super().serialize()
-        result["category"] = "database_error"
-        return result
+    category = "database_error"
 
 
 class DuplicateError(DatabaseError):
     """Duplicate entry error."""
 
-    def serialize(self) -> dict:
-        result = super().serialize()
-        result["category"] = "duplicate_error"
-        return result
+    category = "duplicate_error"
 
 
 class NotFoundError(DatabaseError):
     """Entity not found error."""
 
-    def serialize(self) -> dict:
-        result = super().serialize()
-        result["category"] = "not_found_error"
-        return result
+    category = "not_found_error"
 
 
 class ForeignKeyError(DatabaseError):
     """Foreign key constraint error."""
 
-    def serialize(self) -> dict:
-        result = super().serialize()
-        result["category"] = "foreign_key_error"
-        return result
+    category = "foreign_key_error"

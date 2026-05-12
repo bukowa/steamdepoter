@@ -10,45 +10,84 @@ from src.gui.dialogs import GameDialog, DepotDialog
 from src.exceptions_handler import show_error
 
 
-class GamesTab(QWidget):
-    """Tab for displaying games with expandable depots."""
+class BaseTab(QWidget):
+    """Base tab with common CRUD operations."""
 
     def __init__(self, session: Session):
         super().__init__()
         self.session = session
-        self.game_service = GameService(session)
+        self.tree_view = None
         self.init_ui()
+
+    def get_service(self):
+        """Return the service instance. Must be overridden by subclass."""
+        raise NotImplementedError("Subclass must implement get_service()")
+
+    def refresh_data(self) -> None:
+        """Load and display data. Must be overridden by subclass."""
+        raise NotImplementedError("Subclass must implement refresh_data()")
+
+    def on_add(self) -> None:
+        """Handle add action. Must be overridden by subclass."""
+        raise NotImplementedError("Subclass must implement on_add()")
+
+    def on_delete(self) -> None:
+        """Handle delete action. Must be overridden by subclass."""
+        raise NotImplementedError("Subclass must implement on_delete()")
 
     def init_ui(self) -> None:
         layout = QVBoxLayout()
 
         # Toolbar
-        toolbar_layout = QHBoxLayout()
-        add_btn = QPushButton("Add Game")
-        delete_btn = QPushButton("Delete Game")
-        refresh_btn = QPushButton("Refresh")
+        toolbar = QHBoxLayout()
+        add_btn = self._make_button("Add", self.on_add)
+        del_btn = self._make_button("Delete", self.on_delete)
+        ref_btn = self._make_button("Refresh", self.refresh_data)
 
-        toolbar_layout.addWidget(add_btn)
-        toolbar_layout.addWidget(delete_btn)
-        toolbar_layout.addWidget(refresh_btn)
-        toolbar_layout.addStretch()
+        toolbar.addWidget(add_btn)
+        toolbar.addWidget(del_btn)
+        toolbar.addWidget(ref_btn)
+        toolbar.addStretch()
 
-        # Tree view
         self.tree_view = QTreeView()
         self.refresh_data()
 
-        # Connections
-        refresh_btn.clicked.connect(self.refresh_data)
-        add_btn.clicked.connect(self.on_add_game)
-        delete_btn.clicked.connect(self.on_delete_game)
-
-        layout.addLayout(toolbar_layout)
+        layout.addLayout(toolbar)
         layout.addWidget(self.tree_view)
         self.setLayout(layout)
 
+    @staticmethod
+    def _make_button(label: str, callback) -> QPushButton:
+        """Create a button with a callback."""
+        btn = QPushButton(label)
+        btn.clicked.connect(callback)
+        return btn
+
+    def _get_selected_item(self):
+        """Get selected item from tree view."""
+        current_index = self.tree_view.currentIndex()
+        if not current_index.isValid():
+            QMessageBox.warning(self, "Error", "Please select an item")
+            return None
+
+        item = current_index.internalPointer()
+        if item.data is None:
+            QMessageBox.warning(self, "Error", "Invalid selection")
+            return None
+
+        return item.data
+
+
+class GamesTab(BaseTab):
+    """Tab for displaying games with expandable depots."""
+
+    def get_service(self):
+        return GameService(self.session)
+
     def refresh_data(self) -> None:
         """Load games from database and update tree view."""
-        games = self.game_service.get_all_games()
+        service = self.get_service()
+        games = service.get_all_games()
         model = SQLAlchemyTreeModel(
             games,
             columns=["app_id", "name"],
@@ -57,31 +96,25 @@ class GamesTab(QWidget):
         self.tree_view.setModel(model)
         self.tree_view.expandAll()
 
-    def on_add_game(self) -> None:
+    def on_add(self) -> None:
         """Add a new game."""
         dialog = GameDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
             try:
-                self.game_service.create_game(data["app_id"], data["name"])
+                service = self.get_service()
+                service.create_game(data["app_id"], data["name"])
                 self.refresh_data()
                 QMessageBox.information(self, "Success", f"Game '{data['name']}' added successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Add Game")
 
-    def on_delete_game(self) -> None:
+    def on_delete(self) -> None:
         """Delete selected game."""
-        current_index = self.tree_view.currentIndex()
-        if not current_index.isValid():
-            QMessageBox.warning(self, "Error", "Please select a game to delete")
+        game = self._get_selected_item()
+        if not game:
             return
 
-        item = current_index.internalPointer()
-        if item.data is None:
-            QMessageBox.warning(self, "Error", "Invalid selection")
-            return
-
-        game = item.data
         response = QMessageBox.question(
             self,
             "Confirm Delete",
@@ -91,53 +124,24 @@ class GamesTab(QWidget):
 
         if response == QMessageBox.StandardButton.Yes:
             try:
-                self.game_service.delete_game(game.id)
+                service = self.get_service()
+                service.delete_game(game.id)
                 self.refresh_data()
                 QMessageBox.information(self, "Success", "Game deleted successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Delete Game")
 
 
-class DepotsTab(QWidget):
+class DepotsTab(BaseTab):
     """Tab for displaying depots with expandable manifests."""
 
-    def __init__(self, session: Session):
-        super().__init__()
-        self.session = session
-        self.game_service = GameService(session)
-        self.depot_service = DepotService(session)
-        self.init_ui()
-
-    def init_ui(self) -> None:
-        layout = QVBoxLayout()
-
-        # Toolbar
-        toolbar_layout = QHBoxLayout()
-        add_btn = QPushButton("Add Depot")
-        delete_btn = QPushButton("Delete Depot")
-        refresh_btn = QPushButton("Refresh")
-
-        toolbar_layout.addWidget(add_btn)
-        toolbar_layout.addWidget(delete_btn)
-        toolbar_layout.addWidget(refresh_btn)
-        toolbar_layout.addStretch()
-
-        # Tree view
-        self.tree_view = QTreeView()
-        self.refresh_data()
-
-        # Connections
-        refresh_btn.clicked.connect(self.refresh_data)
-        add_btn.clicked.connect(self.on_add_depot)
-        delete_btn.clicked.connect(self.on_delete_depot)
-
-        layout.addLayout(toolbar_layout)
-        layout.addWidget(self.tree_view)
-        self.setLayout(layout)
+    def get_service(self):
+        return DepotService(self.session)
 
     def refresh_data(self) -> None:
         """Load depots from database and update tree view."""
-        depots = self.depot_service.get_all_depots()
+        service = self.get_service()
+        depots = service.get_all_depots()
         model = SQLAlchemyTreeModel(
             depots,
             columns=["depot_id", "name", "app_id"],
@@ -146,11 +150,12 @@ class DepotsTab(QWidget):
         self.tree_view.setModel(model)
         self.tree_view.expandAll()
 
-    def on_add_depot(self) -> None:
+    def on_add(self) -> None:
         """Add a new depot."""
         # Get list of available app IDs
         try:
-            games = self.game_service.get_all_games()
+            game_service = GameService(self.session)
+            games = game_service.get_all_games()
         except Exception as e:
             show_error(self, e, "Failed to Load Games")
             return
@@ -165,25 +170,19 @@ class DepotsTab(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
             try:
-                self.depot_service.create_depot(data["depot_id"], data["app_id"], data["name"])
+                service = self.get_service()
+                service.create_depot(data["depot_id"], data["app_id"], data["name"])
                 self.refresh_data()
                 QMessageBox.information(self, "Success", f"Depot '{data['name']}' added successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Add Depot")
 
-    def on_delete_depot(self) -> None:
+    def on_delete(self) -> None:
         """Delete selected depot."""
-        current_index = self.tree_view.currentIndex()
-        if not current_index.isValid():
-            QMessageBox.warning(self, "Error", "Please select a depot to delete")
+        depot = self._get_selected_item()
+        if not depot:
             return
 
-        item = current_index.internalPointer()
-        if item.data is None:
-            QMessageBox.warning(self, "Error", "Invalid selection")
-            return
-
-        depot = item.data
         response = QMessageBox.question(
             self,
             "Confirm Delete",
@@ -193,10 +192,10 @@ class DepotsTab(QWidget):
 
         if response == QMessageBox.StandardButton.Yes:
             try:
-                self.depot_service.delete_depot(depot.id)
+                service = self.get_service()
+                service.delete_depot(depot.id)
                 self.refresh_data()
                 QMessageBox.information(self, "Success", "Depot deleted successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Delete Depot")
-
 

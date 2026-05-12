@@ -30,13 +30,8 @@ def handle_exception(parent: Optional[QWidget] = None, title: str = "Error") -> 
             try:
                 return func(*args, **kwargs)
             except SteamDepoterError as e:
-                error_info = e.serialize()
                 message = e.get_user_message()
-                QMessageBox.warning(
-                    parent,
-                    title,
-                    message,
-                )
+                QMessageBox.warning(parent, title, message)
                 return None
             except Exception as e:
                 # Catch unexpected exceptions
@@ -76,4 +71,3 @@ def show_validation_error(parent: Optional[QWidget], errors: dict) -> None:
     error_lines = [f"{field}: {error['msg']}" for field, error in errors.items()]
     message = "\n".join(error_lines)
     QMessageBox.warning(parent, "Validation Error", message)
-

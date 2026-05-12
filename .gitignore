@@ -1,3 +1,7 @@
 .bin
 .idea
 .venv
+depots
+steamdepo
+/data/steamdepoter.db
+/uv.lock

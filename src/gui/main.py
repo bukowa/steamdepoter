@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt
 from src.db import Database
 from src.gui.tabs import GamesTab, DepotsTab
 from src.gui.console import ConsolePanel
+from src.gui.dialogs import SettingsDialog
 
 
 class MainWindow(QMainWindow):
@@ -17,6 +18,8 @@ class MainWindow(QMainWindow):
         self.db = Database()
         self.db.create_tables()
         self.session = self.db.get_session()
+
+        self.init_menu()
 
         # Main layout
         central_widget = QWidget()
@@ -46,9 +49,19 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(splitter)
 
+    def init_menu(self):
+        menubar = self.menuBar()
+        settings_menu = menubar.addMenu("Settings")
+        
+        options_action = settings_menu.addAction("Options")
+        options_action.triggered.connect(self.on_open_settings)
+
+    def on_open_settings(self):
+        dialog = SettingsDialog(self)
+        dialog.exec()
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-

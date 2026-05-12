@@ -1,11 +1,72 @@
 """Dialog widgets for creating/editing entities."""
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget, QWidget, QFormLayout
 )
 from pydantic import BaseModel, ValidationError
 
 from src.db.validation import GameCreate, DepotCreate
 from src.errors.exceptions_handler import show_validation_error
+from src.settings import settings
+
+
+class SettingsDialog(QDialog):
+    """Dialog for managing application settings."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumSize(500, 400)
+        self.fields = {} # {(group, key): QLineEdit}
+        self.init_ui()
+
+    def init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        
+        self.tab_widget = QTabWidget()
+        all_settings = settings.get_all_settings()
+        
+        # Sort groups: globals first, then alphabetically
+        groups = sorted(all_settings.keys())
+        if "globals" in groups:
+            groups.remove("globals")
+            groups.insert(0, "globals")
+            
+        for group in groups:
+            tab = QWidget()
+            tab_layout = QFormLayout(tab)
+            
+            group_settings = all_settings[group]
+            for key, value in group_settings.items():
+                input_field = QLineEdit(str(value))
+                if "password" in key.lower():
+                    input_field.setEchoMode(QLineEdit.EchoMode.Password)
+                
+                self.fields[(group, key)] = input_field
+                tab_layout.addRow(QLabel(f"{key}:"), input_field)
+            
+            self.tab_widget.addTab(tab, group.capitalize())
+            
+        layout.addWidget(self.tab_widget)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        save_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        
+        button_layout.addStretch()
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def accept(self) -> None:
+        """Save settings before closing."""
+        for (group, key), field in self.fields.items():
+            val = field.text()
+            settings.set(group, key, val)
+        
+        super().accept()
 
 
 class BaseFormDialog(QDialog):

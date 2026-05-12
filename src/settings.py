@@ -32,7 +32,7 @@ class SettingsManager:
     
     _instance = None
     _classes: Dict[str, Type[Configurable]] = {}
-    _settings: Dict[str, Any] = {}
+    _settings: Dict[str, Any] = {"globals": {}}
     _config_path = Path("data/settings.json")
 
     def __new__(cls):
@@ -46,29 +46,44 @@ class SettingsManager:
         """Registers a class and initializes its default settings."""
         cls._classes[target_cls.__name__] = target_cls
         
-        # We need to initialize defaults if they don't exist in _settings
-        # However, _settings might not be loaded yet if this is called during import
-        # So we just ensure the class name exists in _settings
         if target_cls.__name__ not in cls._settings:
             cls._settings[target_cls.__name__] = {}
         
-        # We will merge defaults during _load or when get/set is called
-        # to ensure defaults are respected even if not in the JSON.
         defaults = target_cls.get_setting_keys()
         for key, val in defaults.items():
             if key not in cls._settings[target_cls.__name__]:
                 cls._settings[target_cls.__name__][key] = val
 
     def get(self, class_name: str, key: str) -> Any:
-        """Retrieves a setting value."""
-        return self._settings.get(class_name, {}).get(key)
+        """
+        Retrieves a setting value. 
+        If not found in class-specific group, checks 'globals'.
+        """
+        # Try class-specific group
+        val = self._settings.get(class_name, {}).get(key)
+        if val is not None:
+            return val
+        
+        # Fallback to globals
+        return self._settings.get("globals", {}).get(key)
 
     def set(self, class_name: str, key: str, value: Any):
-        """Sets a setting value and saves to disk."""
+        """Sets a setting value in a group."""
         if class_name not in self._settings:
             self._settings[class_name] = {}
         self._settings[class_name][key] = value
         self._save()
+
+    def set_global(self, key: str, value: Any):
+        """Sets a global setting."""
+        if "globals" not in self._settings:
+            self._settings["globals"] = {}
+        self._settings["globals"][key] = value
+        self._save()
+
+    def get_all_settings(self) -> Dict[str, Any]:
+        """Returns all settings for UI editing."""
+        return self._settings
 
     def _load(self):
         """Loads settings from JSON."""

@@ -9,36 +9,40 @@ from src.exceptions_handler import show_validation_error
 
 
 class BaseFormDialog(QDialog):
-    """Base dialog for form-based input."""
+    """Base dialog for form-based input with config-driven fields."""
 
-    def __init__(self, parent=None, title="Dialog", readonly_fields=None):
+    def __init__(self, parent=None, title="Dialog", schema: BaseModel = None, fields_config: dict = None):
+        """Initialize form dialog.
+
+        Args:
+            parent: Parent widget
+            title: Dialog title
+            schema: Pydantic schema for validation
+            fields_config: Dict of {field_name: (label, initial_value, readonly)}
+        """
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
         self.setGeometry(100, 100, 400, 250)
-        self.readonly_fields = readonly_fields or set()
+        self.schema = schema
+        self.fields_config = fields_config or {}
         self.fields = {}
         self.init_ui()
-
-    def get_schema(self) -> type[BaseModel]:
-        """Return Pydantic schema class. Must be overridden by subclass."""
-        raise NotImplementedError("Subclass must implement get_schema()")
-
-    def get_field_config(self) -> dict:
-        """Return {field_name: (label, initial_value)}. Must be overridden by subclass."""
-        raise NotImplementedError("Subclass must implement get_field_config()")
 
     def init_ui(self) -> None:
         layout = QVBoxLayout()
 
-        for field_name, (label, initial) in self.get_field_config().items():
+        for field_name, config in self.fields_config.items():
+            label, initial = config[0], config[1]
+            readonly = config[2] if len(config) > 2 else False
+
             row = QHBoxLayout()
             row.addWidget(QLabel(label))
 
             input_field = QLineEdit()
             if initial:
                 input_field.setText(initial)
-            if field_name in self.readonly_fields:
+            if readonly:
                 input_field.setReadOnly(True)
 
             self.fields[field_name] = input_field
@@ -63,9 +67,11 @@ class BaseFormDialog(QDialog):
         return {name: field.text().strip() for name, field in self.fields.items()}
 
     def validate(self) -> bool:
-        """Validate using Pydantic."""
+        """Validate using Pydantic schema."""
+        if not self.schema:
+            return True
         try:
-            self.get_schema()(**self.get_data())
+            self.schema(**self.get_data())
             return True
         except ValidationError as e:
             errors = {error['loc'][0]: error for error in e.errors()}
@@ -82,56 +88,31 @@ class GameDialog(BaseFormDialog):
     """Dialog for creating/editing a game."""
 
     def __init__(self, parent=None, game=None):
-        """
-        Initialize game dialog.
-
-        Args:
-            parent: Parent widget
-            game: Existing game object (for editing). None for new game.
-        """
-        self.game = game
+        fields_config = {
+            "app_id": ("App ID:", game.app_id if game else "", bool(game)),
+            "name": ("Name:", game.name if game else "", False),
+        }
         super().__init__(
             parent,
             title="Edit Game" if game else "Add Game",
-            readonly_fields={"app_id"} if game else set()
+            schema=GameCreate,
+            fields_config=fields_config
         )
-
-    def get_schema(self) -> type[BaseModel]:
-        return GameCreate
-
-    def get_field_config(self) -> dict:
-        return {
-            "app_id": ("App ID:", self.game.app_id if self.game else ""),
-            "name": ("Name:", self.game.name if self.game else ""),
-        }
 
 
 class DepotDialog(BaseFormDialog):
     """Dialog for creating/editing a depot."""
 
     def __init__(self, parent=None, depot=None, app_ids=None):
-        """
-        Initialize depot dialog.
-
-        Args:
-            parent: Parent widget
-            depot: Existing depot object (for editing). None for new depot.
-            app_ids: List of available app IDs for selection
-        """
-        self.depot = depot
-        self.app_ids = app_ids or []
+        fields_config = {
+            "depot_id": ("Depot ID:", depot.depot_id if depot else "", bool(depot)),
+            "app_id": ("App ID:", depot.app_id if depot else "", bool(depot)),
+            "name": ("Name:", depot.name if depot else "", False),
+        }
         super().__init__(
             parent,
             title="Edit Depot" if depot else "Add Depot",
-            readonly_fields={"depot_id", "app_id"} if depot else set()
+            schema=DepotCreate,
+            fields_config=fields_config
         )
-
-    def get_schema(self) -> type[BaseModel]:
-        return DepotCreate
-
-    def get_field_config(self) -> dict:
-        return {
-            "depot_id": ("Depot ID:", self.depot.depot_id if self.depot else ""),
-            "app_id": ("App ID:", self.depot.app_id if self.depot else ""),
-            "name": ("Name:", self.depot.name if self.depot else ""),
-        }
+        self.app_ids = app_ids or []

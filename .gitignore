@@ -3,5 +3,5 @@
 .venv
 depots
 steamdepo
-/data/steamdepoter.db
 /uv.lock
+data

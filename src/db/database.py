@@ -13,7 +13,7 @@ class Database:
 
     def __init__(self, db_path: Optional[str] = None):
         """
-        Initialize database.
+        Initialize a database.
 
         Args:
             db_path: Path to SQLite database file. Defaults to data/steamdepoter.db

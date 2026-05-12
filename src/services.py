@@ -1,13 +1,12 @@
 """Services layer for database operations."""
-from typing import List
-from pydantic import ValidationError as PydanticValidationError
+from typing import List, Any
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from src.db import Game, Depot
-from src.schemas import GameCreate, DepotCreate
-from src.errors import (
-    DatabaseError, DuplicateError, NotFoundError, ForeignKeyError, SteamDepoterError
+from src.db.validation import GameCreate, DepotCreate
+from src.errors.errors import (
+    DatabaseError, DuplicateError, NotFoundError, ForeignKeyError
 )
 
 
@@ -69,7 +68,7 @@ class BaseService:
 class GameService(BaseService):
     """Service for Game operations."""
 
-    def create_game(self, app_id: str, name: str) -> Game:
+    def create_game(self, app_id: str, name: str) -> Any | None:
         """Create a new game.
 
         Args:
@@ -84,11 +83,7 @@ class GameService(BaseService):
             DuplicateError: If app_id already exists
             DatabaseError: If database operation fails
         """
-        try:
-            data = GameCreate(app_id=app_id, name=name)
-        except PydanticValidationError as e:
-            raise ValueError(str(e))
-
+        data = GameCreate(app_id=app_id, name=name)
         return self._create(Game, app_id=data.app_id, name=data.name)
 
     def get_all_games(self) -> List[Game]:
@@ -111,7 +106,7 @@ class GameService(BaseService):
 class DepotService(BaseService):
     """Service for Depot operations."""
 
-    def create_depot(self, depot_id: str, app_id: str, name: str) -> Depot:
+    def create_depot(self, depot_id: str, app_id: str, name: str) -> Any | None:
         """Create a new depot.
 
         Args:
@@ -128,10 +123,7 @@ class DepotService(BaseService):
             ForeignKeyError: If app_id doesn't exist
             DatabaseError: If database operation fails
         """
-        try:
-            data = DepotCreate(depot_id=depot_id, app_id=app_id, name=name)
-        except PydanticValidationError as e:
-            raise ValueError(str(e))
+        data = DepotCreate(depot_id=depot_id, app_id=app_id, name=name)
 
         # Verify game exists before creating depot
         game = self.session.query(Game).filter(Game.app_id == data.app_id).first()

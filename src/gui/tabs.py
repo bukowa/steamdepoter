@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from src.services import GameService, DepotService
 from src.gui.models import SQLAlchemyTreeModel
 from src.gui.dialogs import GameDialog, DepotDialog
-from src.exceptions_handler import show_error
+from src.errors.exceptions_handler import show_error
 
 
 class BaseTab(QWidget):

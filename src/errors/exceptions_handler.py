@@ -2,12 +2,12 @@
 from typing import Optional
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
-from src.errors import SteamDepoterError
+from src.errors.errors import SteamDepoterError
 
 
 
 def show_error(parent: Optional[QWidget], exception: Exception, title: str = "Error") -> None:
-    """Show error dialog for an exception.
+    """Show an error dialog for an exception.
 
     Args:
         parent: The parent widget for the message box
@@ -23,7 +23,7 @@ def show_error(parent: Optional[QWidget], exception: Exception, title: str = "Er
 
 
 def show_validation_error(parent: Optional[QWidget], errors: dict) -> None:
-    """Show validation error dialog with structured errors.
+    """Show a validation error dialog with structured errors.
 
     Args:
         parent: The parent widget for the message box

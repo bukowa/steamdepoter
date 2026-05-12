@@ -4,8 +4,8 @@ from PyQt6.QtWidgets import (
 )
 from pydantic import BaseModel, ValidationError
 
-from src.schemas import GameCreate, DepotCreate
-from src.exceptions_handler import show_validation_error
+from src.db.validation import GameCreate, DepotCreate
+from src.errors.exceptions_handler import show_validation_error
 
 
 class BaseFormDialog(QDialog):

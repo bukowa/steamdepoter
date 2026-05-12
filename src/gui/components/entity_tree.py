@@ -211,23 +211,77 @@ class EntityTreeWidget(QTreeWidget):
             # Only apply to game if it's the only type selected
             games = [d for d in selected_data if isinstance(d, Game)]
             if len(games) == 1:
-                open_db_action = menu.addAction("Open in SteamDB")
-                open_db_action.triggered.connect(lambda: self.open_steamdb_requested.emit(str(data.app_id)))
+                game = games[0]
+                db_game = self.session.query(Game).filter(Game.id == game.id).first()
 
-                parse_db_action = menu.addAction("1. Parse Depots (SteamDB)")
-                parse_db_action.triggered.connect(lambda: self.parse_depots_requested.emit(str(data.app_id)))
+                open_db_action = menu.addAction("Open in SteamDB")
+                open_db_action.triggered.connect(lambda checked, app_id=str(game.app_id): self.open_steamdb_requested.emit(app_id))
+
+                parse_db_action = menu.addAction("Parse Depots (SteamDB)")
+                parse_db_action.triggered.connect(lambda checked, app_id=str(game.app_id): self.parse_depots_requested.emit(app_id))
+                
+                if db_game and db_game.depots:
+                    menu.addSeparator()
+                    unparsed_depots = [d for d in db_game.depots if not d.steamdb_manifests_parsed]
+                    if unparsed_depots:
+                        scrape_all_action = menu.addAction(f"Scrape Manifests ({len(unparsed_depots)} Unparsed Depots)")
+                        scrape_all_action.triggered.connect(lambda checked, d=unparsed_depots: self.scrape_manifests_requested.emit([dep.depot_id for dep in d]))
+                    
+                    force_scrape_all_action = menu.addAction(f"Force Scrape Manifests (All {len(db_game.depots)} Depots)")
+                    force_scrape_all_action.triggered.connect(lambda checked, d=db_game.depots: self.scrape_manifests_requested.emit([dep.depot_id for dep in d]))
+
+                    menu.addSeparator()
+                    all_manifests = []
+                    for d in db_game.depots:
+                        all_manifests.extend(d.manifests)
+                    
+                    unparsed_manifests = [m for m in all_manifests if not m.files_parsed]
+                    if unparsed_manifests:
+                        dl_all_action = menu.addAction(f"Download Files ({len(unparsed_manifests)} Unparsed Manifests)")
+                        dl_all_action.triggered.connect(lambda checked, m=unparsed_manifests: self.download_manifest_requested.emit(m))
+
+                    if all_manifests:
+                        force_dl_all_action = menu.addAction(f"Force Download Files (All {len(all_manifests)} Manifests)")
+                        force_dl_all_action.triggered.connect(lambda checked, m=all_manifests: self.download_manifest_requested.emit(m))
                 
         elif isinstance(data, Depot):
             depots = [d for d in selected_data if isinstance(d, Depot)]
             if depots:
-                scrape_action = menu.addAction("2. Scrape Manifests (SteamDB)")
-                scrape_action.triggered.connect(lambda: self.scrape_manifests_requested.emit([d.depot_id for d in depots]))
+                db_depots = self.session.query(Depot).filter(Depot.id.in_([d.id for d in depots])).all()
+                
+                unparsed_depots = [d for d in db_depots if not d.steamdb_manifests_parsed]
+                if unparsed_depots:
+                    scrape_action = menu.addAction(f"Scrape Manifests ({len(unparsed_depots)} Unparsed Depots)")
+                    scrape_action.triggered.connect(lambda checked, d=unparsed_depots: self.scrape_manifests_requested.emit([dep.depot_id for dep in d]))
+                
+                force_scrape_action = menu.addAction(f"Force Scrape Manifests (All {len(db_depots)} Selected)")
+                force_scrape_action.triggered.connect(lambda checked, d=db_depots: self.scrape_manifests_requested.emit([dep.depot_id for dep in d]))
+
+                menu.addSeparator()
+                all_manifests = []
+                for d in db_depots:
+                    all_manifests.extend(d.manifests)
+
+                unparsed_manifests = [m for m in all_manifests if not m.files_parsed]
+                if unparsed_manifests:
+                    dl_action = menu.addAction(f"Download Files ({len(unparsed_manifests)} Unparsed Manifests)")
+                    dl_action.triggered.connect(lambda checked, m=unparsed_manifests: self.download_manifest_requested.emit(m))
+                
+                if all_manifests:
+                    force_dl_action = menu.addAction(f"Force Download Files (All {len(all_manifests)} Manifests)")
+                    force_dl_action.triggered.connect(lambda checked, m=all_manifests: self.download_manifest_requested.emit(m))
                 
         elif isinstance(data, Manifest):
             manifests = [m for m in selected_data if isinstance(m, Manifest)]
             if manifests:
-                parse_action = menu.addAction("3. Download Manifest Files (DepotDownloader)")
-                parse_action.triggered.connect(lambda: self.download_manifest_requested.emit(manifests))
+                db_manifests = self.session.query(Manifest).filter(Manifest.id.in_([m.id for m in manifests])).all()
+                unparsed_manifests = [m for m in db_manifests if not m.files_parsed]
+                if unparsed_manifests:
+                    parse_action = menu.addAction(f"Download Files ({len(unparsed_manifests)} Unparsed Manifests)")
+                    parse_action.triggered.connect(lambda checked, m=unparsed_manifests: self.download_manifest_requested.emit(m))
+                
+                force_parse_action = menu.addAction(f"Force Download Files (All {len(db_manifests)} Selected)")
+                force_parse_action.triggered.connect(lambda checked, m=db_manifests: self.download_manifest_requested.emit(m))
                 
         if not menu.isEmpty():
             menu.exec(self.mapToGlobal(point))

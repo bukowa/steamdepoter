@@ -13,7 +13,7 @@ from src.gui.workers import CommandWorker
 
 class ConsoleItem(QListWidgetItem):
     """Represents a command in the console list."""
-    def __init__(self, title: str, worker: CommandWorker):
+    def __init__(self, title: str, worker: CommandWorker = None):
         timestamp = datetime.now().strftime("%H:%M:%S")
         super().__init__(f"[{timestamp}] {title}")
         self.title = title
@@ -104,3 +104,25 @@ class ConsolePanel(QWidget):
         if isinstance(selected, ConsoleItem):
             self.log_viewer.setPlainText(selected.output)
             self.log_viewer.moveCursor(self.log_viewer.textCursor().MoveOperation.End)
+
+    def log_message(self, title: str, text: str):
+        """Log a generic message to a specific titled console item."""
+        target_item = None
+        for item in self.items:
+            if getattr(item, 'is_generic_log', False) and item.title == title:
+                target_item = item
+                break
+        
+        if not target_item:
+            target_item = ConsoleItem(title, None)
+            target_item.is_generic_log = True
+            target_item.set_status("success") # default state for log
+            self.items.append(target_item)
+            self.list_widget.addItem(target_item)
+        
+        # Don't steal focus unless it's the current item or first message
+        if len(target_item.output) == 0:
+            self.list_widget.setCurrentItem(target_item)
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self._on_output(target_item, f"[{timestamp}] {text}\n")

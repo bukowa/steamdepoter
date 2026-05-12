@@ -1,0 +1,218 @@
+"""SteamDB parsing tasks for browser automation."""
+from typing import Dict, List, Any, Optional, Callable
+from PyQt6.QtWebEngineCore import QWebEnginePage
+from PyQt6.QtCore import QUrl
+from sqlalchemy.orm import Session
+
+from src.services import DepotService
+from src.db import Depot, Manifest
+
+
+class SteamDBTask:
+    """Base class for SteamDB parsing tasks."""
+    name = "Base Task"
+    description = "Base class for tasks"
+    target_type = None  # "app" or "depot"
+
+    def __init__(self, page: QWebEnginePage, target_id: Optional[str] = None):
+        self.page = page
+        self.target_id = target_id
+
+    def get_url(self) -> Optional[str]:
+        """Return the URL to navigate to before executing the script."""
+        if self.target_type == "app" and self.target_id:
+            return f"https://steamdb.info/app/{self.target_id}/depots/"
+        elif self.target_type == "depot" and self.target_id:
+            return f"https://steamdb.info/depot/{self.target_id}/"
+        return None
+
+    def get_js_code(self) -> str:
+        """Return the JavaScript code to execute for parsing."""
+        raise NotImplementedError("Subclass must implement get_js_code()")
+
+    def process_result(self, result: Any) -> Any:
+        """Process the result from JS execution."""
+        return result
+
+    def save_result(self, session: Session, result: Any) -> Any:
+        """Save the result to the database. Must be overridden by subclass."""
+        raise NotImplementedError("Subclass must implement save_result()")
+
+    def run(self, callback: Callable[[Any], None]) -> None:
+        """Run the task: navigate if needed, then execute JS."""
+        target_url = self.get_url()
+        
+        if target_url and self.page.url().toString() != target_url:
+            def on_load_finished(ok):
+                self.page.loadFinished.disconnect(on_load_finished)
+                if ok:
+                    self._execute_js(callback)
+                else:
+                    callback(None)
+            self.page.loadFinished.connect(on_load_finished)
+            self.page.load(QUrl(target_url))
+        else:
+            self._execute_js(callback)
+
+    def _execute_js(self, callback: Callable[[Any], None]) -> None:
+        js_code = self.get_js_code()
+        
+        def internal_callback(result):
+            processed = self.process_result(result)
+            callback(processed)
+
+        self.page.runJavaScript(js_code, internal_callback)
+
+
+class DepotsParsingTask(SteamDBTask):
+    """Task to parse depots information from SteamDB."""
+    name = "Parse Depots"
+    description = "Parses the depots table from the SteamDB app page and updates the database."
+    target_type = "app"
+
+    def get_js_code(self) -> str:
+        """JavaScript to parse depot table from SteamDB."""
+        return """
+        (function() {
+            const depots = [];
+            const rows = document.querySelectorAll('tr.depot');
+            rows.forEach(row => {
+                const depotId = row.getAttribute('data-depotid');
+                if (!depotId) return;
+
+                const configCell = row.querySelector('td.depot-config');
+                if (!configCell) return;
+
+                let os = null;
+                let language = null;
+                let name = null;
+
+                // Extract OS
+                const osSpan = configCell.querySelector('span.depot-os');
+                if (osSpan) {
+                    os = osSpan.textContent.trim();
+                }
+
+                // Extract language
+                const langSpan = configCell.querySelector('span.depot-language');
+                if (langSpan) {
+                    language = langSpan.textContent.trim();
+                }
+
+                // Extract name (from all muted spans)
+                const mutedSpans = configCell.querySelectorAll('span.i.muted');
+                if (mutedSpans.length > 0) {
+                    name = Array.from(mutedSpans).map(span => span.textContent.trim()).join(' ');
+                }
+
+                // Fallback: infer OS from name if not found
+                if (!os && name) {
+                    if (name.includes('exe_win') || name.includes('exe_windows')) {
+                        os = 'Windows';
+                    } else if (name.includes('exe_linux')) {
+                        os = 'Linux';
+                    } else if (name.includes('exe_mac')) {
+                        os = 'macOS';
+                    }
+                }
+
+                depots.push({
+                    depot_id: depotId,
+                    os: os,
+                    language: language,
+                    name: name
+                });
+            });
+            return depots;
+        })();
+        """
+
+    def process_result(self, result: Any) -> List[Dict[str, Any]]:
+        if not isinstance(result, list):
+            return []
+        return result
+
+    def save_result(self, session: Session, result: List[Dict[str, Any]]) -> str:
+        if not result:
+            return "No depots found or parsing failed"
+
+        depot_service = DepotService(session)
+        count = 0
+        for depot_data in result:
+            depot_id = depot_data['depot_id']
+            
+            if not self.target_id:
+                raise ValueError("App ID is required to save depots.")
+
+            depot = session.query(Depot).filter(Depot.depot_id == depot_id).first()
+            if depot:
+                depot_service.update_depot(depot_id, {
+                    'os': depot_data.get('os'),
+                    'language': depot_data.get('language'),
+                })
+            else:
+                depot_service.create_depot({
+                    'depot_id': depot_id,
+                    'app_id': self.target_id,
+                    'name': depot_data.get('name') or f"Depot {depot_id}",
+                    'os': depot_data.get('os'),
+                    'language': depot_data.get('language')
+                })
+            count += 1
+        
+        return f"Updated/Created {count} depots"
+
+
+class ManifestsParsingTask(SteamDBTask):
+    """Task to parse manifest history for a specific depot from SteamDB."""
+    name = "Parse Manifests"
+    description = "Parses the manifest history table for a depot and updates the database."
+    target_type = "depot"
+
+    def get_js_code(self) -> str:
+        return """
+        (function() {
+            const manifests = [];
+            const rows = document.querySelectorAll('#manifests tbody tr');
+            rows.forEach(row => {
+                const dateCell = row.querySelector('td:nth-child(1)');
+                const relativeDateCell = row.querySelector('td:nth-child(2)');
+                const manifestIdCell = row.querySelector('td:nth-child(3) a');
+                
+                if (dateCell && relativeDateCell && manifestIdCell) {
+                    manifests.push({
+                        seen_date: dateCell.textContent.trim(),
+                        relative_date: relativeDateCell.getAttribute('data-time'),
+                        manifest_id: manifestIdCell.textContent.trim()
+                    });
+                }
+            });
+            return manifests;
+        })();
+        """
+
+    def process_result(self, result: Any) -> List[Dict[str, Any]]:
+        if not isinstance(result, list):
+            return []
+        return result
+
+    def save_result(self, session: Session, result: List[Dict[str, Any]]) -> str:
+        if not result:
+            return "No manifests found or parsing failed"
+
+        count = 0
+        for manifest_data in result:
+            manifest_id = manifest_data['manifest_id']
+            
+            manifest = session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
+            if not manifest:
+                new_manifest = Manifest(
+                    manifest_id=manifest_id,
+                    depot_id=self.target_id,
+                    date_str=manifest_data['seen_date']
+                )
+                session.add(new_manifest)
+                count += 1
+        
+        session.commit()
+        return f"Created {count} new manifests for depot {self.target_id}"

@@ -1,7 +1,7 @@
 """Database schema definitions."""
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, BigInteger, Boolean
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -33,6 +33,9 @@ class Depot(Base):
     depot_id = Column(String, unique=True, nullable=False, index=True)
     app_id = Column(String, ForeignKey("games.app_id"), nullable=False)
     name = Column(String, nullable=False)
+    os = Column(String, nullable=True)
+    language = Column(String, nullable=True)
+    steamdb_manifests_parsed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -56,6 +59,7 @@ class Manifest(Base):
     total_chunks = Column(Integer)
     total_bytes_on_disk = Column(BigInteger)
     total_bytes_compressed = Column(BigInteger)
+    files_parsed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -83,4 +87,3 @@ class ManifestFile(Base):
 
     def __repr__(self):
         return f"<ManifestFile(name={self.name}, size={self.size})>"
-

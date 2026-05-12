@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QVBoxLayout, 
 from PyQt6.QtCore import Qt
 
 from src.db import Database
-from src.gui.tabs import GamesTab, DepotsTab, ManifestsTab, ManifestFilesTab
+from src.gui.tabs import LibraryTab, BrowserTab
 from src.gui.console import ConsolePanel
 from src.gui.dialogs import SettingsDialog
 
@@ -35,21 +35,21 @@ class MainWindow(QMainWindow):
         # Console Panel
         self.console = ConsolePanel()
 
-        self.games_tab = GamesTab(self.session, self.console, self.db)
-        self.depots_tab = DepotsTab(self.session, self.console, self.db)
-        self.manifests_tab = ManifestsTab(self.session, self.console, self.db)
-        self.files_tab = ManifestFilesTab(self.session, self.console, self.db)
+        self.library_tab = LibraryTab(self.session, self.console, self.db)
+        self.browser_tab = BrowserTab(self.session, self.console, self.db)
 
         # Connect signals for automatic refresh
-        self.games_tab.data_changed.connect(self.refresh_all_tabs)
-        self.depots_tab.data_changed.connect(self.refresh_all_tabs)
-        self.manifests_tab.data_changed.connect(self.refresh_all_tabs)
-        self.files_tab.data_changed.connect(self.refresh_all_tabs)
+        self.library_tab.data_changed.connect(self.refresh_all_tabs)
+        self.browser_tab.data_changed.connect(self.refresh_all_tabs)
+        self.browser_tab.task_queue_finished.connect(self.on_browser_tasks_finished)
 
-        self.tabs.addTab(self.games_tab, "Games")
-        self.tabs.addTab(self.depots_tab, "Depots")
-        self.tabs.addTab(self.manifests_tab, "Manifests")
-        self.tabs.addTab(self.files_tab, "Manifest Files")
+        # Connect navigation signal
+        self.library_tab.open_steamdb.connect(self.on_open_steamdb)
+        self.library_tab.parse_depots_steamdb.connect(self.on_parse_depots_steamdb)
+        self.library_tab.scrape_manifests_steamdb.connect(self.on_scrape_manifests_steamdb)
+
+        self.tabs.addTab(self.library_tab, "Library")
+        self.tabs.addTab(self.browser_tab, "Browser")
 
         splitter.addWidget(self.tabs)
         splitter.addWidget(self.console)
@@ -62,10 +62,29 @@ class MainWindow(QMainWindow):
     def refresh_all_tabs(self):
         """Refresh data in all tabs and ensure session is up to date."""
         self.session.expire_all()
-        self.games_tab.refresh_data()
-        self.depots_tab.refresh_data()
-        self.manifests_tab.refresh_data()
-        self.files_tab.refresh_data()
+        self.library_tab.refresh_data()
+        self.browser_tab.refresh_data()
+
+    def on_browser_tasks_finished(self):
+        """Switch back to the Library tab when browser tasks are complete."""
+        self.tabs.setCurrentWidget(self.library_tab)
+
+    def on_open_steamdb(self, app_id: str):
+        """Switch to browser tab and load app_id."""
+        self.tabs.setCurrentWidget(self.browser_tab)
+        self.browser_tab.set_app_id(app_id)
+
+    def on_parse_depots_steamdb(self, app_id: str):
+        """Switch to browser tab and automatically run DepotsParsingTask."""
+        from src.steamdb_tasks import DepotsParsingTask
+        self.tabs.setCurrentWidget(self.browser_tab)
+        self.browser_tab.run_task(DepotsParsingTask, app_id)
+
+    def on_scrape_manifests_steamdb(self, depot_ids: list):
+        """Switch to browser tab and automatically run ManifestsParsingTask for a queue of depots."""
+        from src.steamdb_tasks import ManifestsParsingTask
+        self.tabs.setCurrentWidget(self.browser_tab)
+        self.browser_tab.run_task_queue(ManifestsParsingTask, depot_ids)
 
     def init_menu(self):
         menubar = self.menuBar()
@@ -80,6 +99,9 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setApplicationName("SteamDepoter2")
+    app.setOrganizationName("SteamDepoter")
+    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

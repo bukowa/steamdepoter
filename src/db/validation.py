@@ -41,6 +41,8 @@ class DepotCreate(BaseModel):
     depot_id: str = Field(..., description="Depot ID (numeric)")
     app_id: str = Field(..., description="Associated game app ID")
     name: str = Field(..., min_length=1, max_length=255, description="Depot name")
+    os: str | None = Field(None, description="Operating system (optional)")
+    language: str | None = Field(None, description="Language (optional)")
 
     @field_validator("depot_id", "app_id")
     @classmethod

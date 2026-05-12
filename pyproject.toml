@@ -5,9 +5,7 @@ description = "Steam Depot Manager with PyQt6 GUI"
 requires-python = ">=3.9"
 dependencies = [
     "pyqt6>=6.0.0",
+    "pyqt6-webengine>=6.0.0",
     "sqlalchemy>=2.0.0",
     "pydantic>=2.0.0",
 ]
-
-
-

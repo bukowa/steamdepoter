@@ -60,6 +60,17 @@ class BaseService:
             self.session.rollback()
             raise DatabaseError(f"Failed to delete {model.__name__}: {str(e)}")
 
+    def _delete_many(self, model: type, id_values: List[int]) -> None:
+        """Delete multiple records in a single transaction."""
+        if not id_values:
+            return
+        try:
+            self.session.query(model).filter(model.id.in_(id_values)).delete(synchronize_session=False)
+            self.session.commit()
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to batch delete {model.__name__}s: {str(e)}")
+
 
 class GameService(BaseService):
 
@@ -74,6 +85,10 @@ class GameService(BaseService):
     def delete_game(self, game_id: int) -> None:
         self._delete(Game, game_id)
 
+    def delete_games(self, game_ids: List[int]) -> None:
+        """Batch delete games."""
+        self._delete_many(Game, game_ids)
+
 
 class DepotService(BaseService):
 
@@ -84,13 +99,47 @@ class DepotService(BaseService):
         if not game:
             raise ForeignKeyError(f"Game with app_id '{data.app_id}' not found")
 
-        return self._create(Depot, depot_id=data.depot_id, app_id=data.app_id, name=data.name)
+        return self._create(Depot, depot_id=data.depot_id, app_id=data.app_id, name=data.name, os=data.os, language=data.language)
 
     def get_all_depots(self) -> List[Depot]:
         return self._get_all(Depot)
 
     def delete_depot(self, depot_id: int) -> None:
         self._delete(Depot, depot_id)
+
+    def delete_depots(self, depot_ids: List[int]) -> None:
+        """Batch delete depots."""
+        self._delete_many(Depot, depot_ids)
+
+    def update_depot(self, depot_id: str, props: dict) -> None:
+        """Update depot os and language."""
+        try:
+            depot = self.session.query(Depot).filter(Depot.depot_id == depot_id).first()
+            if not depot:
+                raise NotFoundError(f"Depot {depot_id} not found")
+
+            if 'os' in props:
+                depot.os = props['os']
+            if 'language' in props:
+                depot.language = props['language']
+
+            self.session.commit()
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to update depot {depot_id}: {str(e)}")
+
+    def mark_manifests_parsed(self, depot_id: str) -> None:
+        """Mark a depot's manifests as parsed."""
+        try:
+            depot = self.session.query(Depot).filter(Depot.depot_id == depot_id).first()
+            if not depot:
+                raise NotFoundError(f"Depot {depot_id} not found")
+
+            depot.steamdb_manifests_parsed = True
+            self.session.commit()
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to mark depot {depot_id} as parsed: {str(e)}")
 
 
 class ManifestService(BaseService):
@@ -109,6 +158,47 @@ class ManifestService(BaseService):
     def get_all_manifest_files(self) -> List[ManifestFile]:
         return self._get_all(ManifestFile)
 
+    def delete_manifests(self, manifest_ids: List[int]) -> None:
+        """Batch delete manifests."""
+        self._delete_many(Manifest, manifest_ids)
+
+    def mark_files_parsed(self, manifest_id: str) -> None:
+        """Mark a manifest's files as parsed."""
+        try:
+            manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
+            if not manifest:
+                raise NotFoundError(f"Manifest {manifest_id} not found")
+
+            manifest.files_parsed = True
+            self.session.commit()
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to mark manifest {manifest_id} as parsed: {str(e)}")
+
+    def save_downloaded_manifest_files(self, manifest_id: str, parsed_files: List[Any]) -> None:
+        """Save downloaded files for a manifest."""
+        try:
+            manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
+            if not manifest:
+                raise NotFoundError(f"Manifest {manifest_id} not found")
+
+            for f in parsed_files:
+                # only add if not exists
+                existing_file = self.session.query(ManifestFile).filter_by(manifest_id=manifest_id, name=f.name).first()
+                if not existing_file:
+                    self.session.add(ManifestFile(
+                        manifest_id=manifest_id,
+                        name=f.name,
+                        size=f.size,
+                        chunks=f.chunks,
+                        sha=f.sha,
+                        flags=f.flags
+                    ))
+            self.session.commit()
+        except Exception as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to save manifest files: {str(e)}")
+
     def save_manifests(self, app_id: str, manifests: dict) -> None:
         """
         Saves or updates manifests and their files for a given app.
@@ -120,8 +210,6 @@ class ManifestService(BaseService):
                 # Ensure depot exists
                 depot = self.session.query(Depot).filter(Depot.depot_id == depot_id).first()
                 if not depot:
-                    # Create a default depot if it doesn't exist? 
-                    # For now, let's assume it should exist or we create it with app_id
                     depot = Depot(depot_id=depot_id, app_id=app_id, name=f"Depot {depot_id}")
                     self.session.add(depot)
                     self.session.flush()
@@ -139,13 +227,14 @@ class ManifestService(BaseService):
 
                 # Update manifest info
                 manifest.date_str = m_data.date
-                manifest.total_files = m_data.total_files
-                manifest.total_chunks = m_data.total_chunks
-                manifest.total_bytes_on_disk = m_data.total_bytes_on_disk
-                manifest.total_bytes_compressed = m_data.total_bytes_compressed
+                manifest.total_files = getattr(m_data, 'total_files', 0)
+                manifest.total_chunks = getattr(m_data, 'total_chunks', 0)
+                manifest.total_bytes_on_disk = getattr(m_data, 'total_bytes_on_disk', 0)
+                manifest.total_bytes_compressed = getattr(m_data, 'total_bytes_compressed', 0)
 
                 # Add files
-                for f_data in m_data.files:
+                files = getattr(m_data, 'files', [])
+                for f_data in files:
                     m_file = ManifestFile(
                         manifest_id=manifest_id,
                         name=f_data.name,

@@ -138,76 +138,62 @@ class DepotDownloader(Configurable):
             files=files
         )
 
-    def get_depots(self, app_id: int, on_output: Optional[Callable[[str], None]] = None) -> DepotManifestsOutput:
-        """
-        Fetches depot manifests for a given application ID.
-        """
-        logger.info(f"Fetching depots for app_id: {app_id}")
-        app_data_path = self.manifests_data_path
+    def get_manifest_data(self, app_id: int, targets: List[tuple[int, int]], on_output: Optional[Callable[[str], None]] = None) -> DepotManifestsOutput:
+        logger.info(f"Fetching manifest data for App ID {app_id} with {len(targets)} targets...")
+        app_data_path = self.manifests_data_path / str(app_id)
         app_data_path.mkdir(parents=True, exist_ok=True)
 
-        command = [str(self.binary_path)]
+        combined_output = ""
+        success = True
 
-        if self.username:
-            command.extend(["-username", self.username])
+        for depot_id, manifest_id in targets:
+            logger.info(f"Fetching manifest data for App ID {app_id}, Depot ID {depot_id}, Manifest ID {manifest_id}...")
+            
+            command = [str(self.binary_path)]
 
-        if self.password:
-            command.extend(["-password", self.password, "-remember-password"])
+            if self.username:
+                command.extend(["-username", self.username])
 
-        command.extend([
-            "-app", str(app_id),
-            "-manifest-only",
-            "-dir", str(app_data_path),
-            "-all-platforms",
-            "-all-archs",
-            "-all-languages",
-        ])
+            if self.password:
+                command.extend(["-password", self.password, "-remember-password"])
 
-        sensitive_values = []
-        if self.password:
-            sensitive_values.append(self.password)
+            command.extend([
+                "-app", str(app_id),
+                "-manifest-only",
+                "-dir", str(app_data_path),
+                "-depot", str(depot_id),
+                "-manifest", str(manifest_id)
+            ])
 
-        output = self.runner.run(
-            command,
-            sensitive_values=sensitive_values,
-            on_output=on_output
-        )
+            sensitive_values = []
+            if self.password:
+                sensitive_values.append(self.password)
 
-        if not output.success:
-            logger.error(f"Command failed with code {output.exit_code}")
-            raise SubprocessError(f"Command failed with code {output.exit_code}\nSTDOUT: {output.stdout}")
+            output = self.runner.run(
+                command,
+                sensitive_values=sensitive_values,
+                on_output=on_output
+            )
+            
+            combined_output += output.stdout + "\n"
 
-        logger.info(f"Command completed successfully, parsing manifests...")
+            if not output.success:
+                logger.error(f"Command failed with code {output.exit_code} for depot {depot_id} manifest {manifest_id}")
+                success = False
+
+        logger.info(f"Commands completed, parsing manifests...")
         
         manifests = {}
-        for manifest_file in app_data_path.glob("manifest_*.txt"):
+        for manifest_file in app_data_path.glob(f"manifest_*.txt"):
             manifest = self._parse_manifest_file(manifest_file)
             if manifest:
-                manifests[manifest.depot_id] = manifest
+                manifests[manifest.manifest_id] = manifest
 
-        return DepotManifestsOutput.from_output(output, manifest_path=app_data_path, manifests=manifests)
+        final_output = BinOutput(
+            command=["depotdownloader", "(batch)"],
+            stdout=combined_output,
+            stderr="",
+            exit_code=0 if success else 1
+        )
 
-
-if __name__ == '__main__':
-    login = os.environ.get("LOGIN", "")
-    password = os.environ.get("PASSWORD", "")
-
-    downloader = DepotDownloader(debug=False, username=login, password=password)
-    try:
-        # Use a lambda to print each char in real-time
-        output = downloader.get_depots(214950, on_output=lambda char: print(char, end="", flush=True))
-        print(f"\nFinal Exit Code: {output.exit_code}")
-        print(f"Masked Command: {output.command_str}")
-        print(f"Manifests saved to: {output.manifest_path}")
-        print(f"Number of manifests parsed: {len(output.manifests)}")
-
-        for depot_id, manifest in output.manifests.items():
-            print(f"\nDepot ID: {depot_id}")
-            print(f"  Manifest ID: {manifest.manifest_id}")
-            print(f"  Date: {manifest.date}")
-            print(f"  Total Files: {manifest.total_files}")
-            print(f"  First 3 files:")
-            for f in manifest.files[:3]:
-                print(f"    - {f.name} ({f.size} bytes)")
-    except SubprocessError:
-        sys.exit(1)
+        return DepotManifestsOutput.from_output(final_output, manifest_path=app_data_path, manifests=manifests)

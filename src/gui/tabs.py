@@ -1,4 +1,5 @@
 """Tab widgets for different views."""
+import random
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem, 
     QMessageBox, QDialog, QMenu, QTabWidget, QLineEdit, QLabel, QTextEdit, 
@@ -223,6 +224,7 @@ class BrowserTab(QWidget):
         self.console = console
         self.db = db
         self.current_app_id = None
+        self.cancel_requested = False
         self.tasks = [
             DepotsParsingTask,
             ManifestsParsingTask,
@@ -271,6 +273,10 @@ class BrowserTab(QWidget):
         run_task_btn = QPushButton("Run Task")
         run_task_btn.clicked.connect(self.run_selected_task)
         sidebar_layout.addWidget(run_task_btn)
+
+        cancel_task_btn = QPushButton("Cancel Running Tasks")
+        cancel_task_btn.clicked.connect(self.cancel_tasks)
+        sidebar_layout.addWidget(cancel_task_btn)
         
         sidebar_layout.addStretch()
 
@@ -322,6 +328,11 @@ class BrowserTab(QWidget):
         self.url_edit.setText(url)
         self.web_view.load(QUrl(url))
 
+    def cancel_tasks(self):
+        self.cancel_requested = True
+        if self.console:
+            self.console.log_message("System", "Cancellation requested. Tasks will stop before processing the next item.")
+
     def run_selected_task(self):
         item = self.task_list.currentItem()
         if not item:
@@ -353,6 +364,32 @@ class BrowserTab(QWidget):
         task = task_cls(self.web_page, str(target_id))
 
         def on_task_finished(result):
+            if result in ["RETRY_REQUIRED", "RATE_LIMITED", None]:
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Warning)
+                
+                if result == "RATE_LIMITED":
+                    msg_box.setWindowTitle("Rate Limited")
+                    msg_box.setText("You have been temporarily rate limited by SteamDB.")
+                    msg_box.setInformativeText("It is highly recommended to stop for at least an hour to avoid a permanent ban. Continue at your own risk.")
+                else:
+                    msg_box.setWindowTitle("Action Required")
+                    msg_box.setText("The page failed to load or parse correctly (likely Cloudflare or a block).")
+                    msg_box.setInformativeText("Please check the browser tab, solve any challenges, and click 'Continue' to retry.")
+                
+                continue_btn = msg_box.addButton("Continue", QMessageBox.ButtonRole.AcceptRole)
+                cancel_btn = msg_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+                
+                msg_box.exec()
+                if msg_box.clickedButton() == continue_btn:
+                    if self.console:
+                        self.console.log_message(f"{task_cls.name} Task", f"Retrying {target_id}...")
+                    self.run_task(task_cls, target_id)
+                else:
+                    if self.console:
+                        self.console.log_message(f"{task_cls.name} Task", "Task cancelled by user.")
+                return
+
             try:
                 msg = task.save_result(self.session, result)
                 self.data_changed.emit()
@@ -371,6 +408,13 @@ class BrowserTab(QWidget):
             return
 
         def process_next():
+            if self.cancel_requested:
+                if self.console:
+                    self.console.log_message(f"{task_cls.name} Queue", "Queue cancelled by user.")
+                self.cancel_requested = False
+                self.task_queue_finished.emit()
+                return
+
             if not target_ids:
                 if self.console:
                     self.console.log_message(f"{task_cls.name} Queue", f"Queue finished processing all targets.")
@@ -385,31 +429,56 @@ class BrowserTab(QWidget):
             task = task_cls(self.web_page, str(target_id))
 
             def on_task_finished(result):
-                try:
-                    if result is not None:
-                        msg = task.save_result(self.session, result)
-                        
-                        # Mark depot as parsed if it's ManifestsParsingTask
-                        from src.steamdb_tasks import ManifestsParsingTask
-                        if task_cls == ManifestsParsingTask:
-                            from src.services import DepotService
-                            depot_service = DepotService(self.session)
-                            depot_service.mark_manifests_parsed(str(target_id))
-                                
-                        self.data_changed.emit()
+                if result in ["RETRY_REQUIRED", "RATE_LIMITED", None]:
+                    msg_box = QMessageBox(self)
+                    msg_box.setIcon(QMessageBox.Icon.Warning)
+                    
+                    if result == "RATE_LIMITED":
+                        msg_box.setWindowTitle("Rate Limited")
+                        msg_box.setText("You have been temporarily rate limited by SteamDB.")
+                        msg_box.setInformativeText("It is highly recommended to stop for at least an hour. Continuing immediately will likely fail again.")
+                    else:
+                        msg_box.setWindowTitle("Action Required")
+                        msg_box.setText("The page failed to load or parse correctly (likely Cloudflare or a block).")
+                        msg_box.setInformativeText("Please check the browser tab, solve any challenges, and click 'Continue' to resume.")
+                    
+                    continue_btn = msg_box.addButton("Continue", QMessageBox.ButtonRole.AcceptRole)
+                    stop_btn = msg_box.addButton("Stop Queue", QMessageBox.ButtonRole.RejectRole)
+                    
+                    msg_box.exec()
+                    if msg_box.clickedButton() == continue_btn:
                         if self.console:
-                            self.console.log_message(f"{task_cls.name} Queue", f"Success for {target_id}: {msg}")
+                            self.console.log_message(f"{task_cls.name} Queue", f"Retrying {target_id}...")
+                        target_ids.insert(0, target_id)
+                        QTimer.singleShot(1000, process_next)
                     else:
                         if self.console:
-                            self.console.log_message(f"{task_cls.name} Queue", f"Failed or returned no result for {target_id} (Cloudflare block or bad page)")
+                            self.console.log_message(f"{task_cls.name} Queue", "Queue cancelled by user.")
+                    return
+
+                try:
+                    # result is guaranteed not to be None here due to the check above
+                    msg = task.save_result(self.session, result)
+                    
+                    # Mark depot as parsed if it's ManifestsParsingTask
+                    from src.steamdb_tasks import ManifestsParsingTask
+                    if task_cls == ManifestsParsingTask:
+                        from src.services import DepotService
+                        depot_service = DepotService(self.session)
+                        depot_service.mark_manifests_parsed(str(target_id))
+                            
+                    self.data_changed.emit()
+                    if self.console:
+                        self.console.log_message(f"{task_cls.name} Queue", f"Success for {target_id}: {msg}")
                 except Exception as e:
                     if self.console:
                         self.console.log_message(f"{task_cls.name} Queue", f"Error for {target_id}: {e}")
 
                 if target_ids:
+                    delay = random.randint(7000, 15000)
                     if self.console:
-                        self.console.log_message(f"{task_cls.name} Queue", f"Waiting 5 seconds before next target...")
-                    QTimer.singleShot(5000, process_next)
+                        self.console.log_message(f"{task_cls.name} Queue", f"Waiting {delay/1000:.1f} seconds before next target...")
+                    QTimer.singleShot(delay, process_next)
                 else:
                     process_next()
 

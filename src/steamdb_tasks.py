@@ -32,7 +32,22 @@ class SteamDBTask:
 
     def process_result(self, result: Any) -> Any:
         """Process the result from JS execution."""
+        if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
+            return result
         return result
+
+    def get_block_detection_js(self) -> str:
+        """Common JS to detect Cloudflare, rate limits, or missing layout."""
+        return """
+            const bodyText = document.body.innerText;
+            if (bodyText.includes('rate limited') || bodyText.includes('scraping bots')) {
+                return "RATE_LIMITED";
+            }
+            const isSteamDB = document.querySelector('.navbar-brand') || document.querySelector('.app-logo');
+            if (!isSteamDB) {
+                return "RETRY_REQUIRED";
+            }
+        """
 
     def save_result(self, session: Session, result: Any) -> Any:
         """Save the result to the database. Must be overridden by subclass."""
@@ -72,62 +87,60 @@ class DepotsParsingTask(SteamDBTask):
 
     def get_js_code(self) -> str:
         """JavaScript to parse depot table from SteamDB."""
-        return """
-        (function() {
-            const depots = [];
+        return f"""
+        (function() {{
             const rows = document.querySelectorAll('tr.depot');
-            rows.forEach(row => {
-                const depotId = row.getAttribute('data-depotid');
-                if (!depotId) return;
+            
+            if (rows.length > 0) {{
+                const depots = [];
+                rows.forEach(row => {{
+                    const depotId = row.getAttribute('data-depotid');
+                    if (!depotId) return;
 
-                const configCell = row.querySelector('td.depot-config');
-                if (!configCell) return;
+                    const configCell = row.querySelector('td.depot-config');
+                    if (!configCell) return;
 
-                let os = null;
-                let language = null;
-                let name = null;
+                    let os = null;
+                    let language = null;
+                    let name = null;
 
-                // Extract OS
-                const osSpan = configCell.querySelector('span.depot-os');
-                if (osSpan) {
-                    os = osSpan.textContent.trim();
-                }
+                    const osSpan = configCell.querySelector('span.depot-os');
+                    if (osSpan) os = osSpan.textContent.trim();
 
-                // Extract language
-                const langSpan = configCell.querySelector('span.depot-language');
-                if (langSpan) {
-                    language = langSpan.textContent.trim();
-                }
+                    const langSpan = configCell.querySelector('span.depot-language');
+                    if (langSpan) language = langSpan.textContent.trim();
 
-                // Extract name (from all muted spans)
-                const mutedSpans = configCell.querySelectorAll('span.i.muted');
-                if (mutedSpans.length > 0) {
-                    name = Array.from(mutedSpans).map(span => span.textContent.trim()).join(' ');
-                }
+                    const mutedSpans = configCell.querySelectorAll('span.i.muted');
+                    if (mutedSpans.length > 0) {{
+                        name = Array.from(mutedSpans).map(span => span.textContent.trim()).join(' ');
+                    }}
 
-                // Fallback: infer OS from name if not found
-                if (!os && name) {
-                    if (name.includes('exe_win') || name.includes('exe_windows')) {
-                        os = 'Windows';
-                    } else if (name.includes('exe_linux')) {
-                        os = 'Linux';
-                    } else if (name.includes('exe_mac')) {
-                        os = 'macOS';
-                    }
-                }
+                    if (!os && name) {{
+                        if (name.includes('exe_win') || name.includes('exe_windows')) os = 'Windows';
+                        else if (name.includes('exe_linux')) os = 'Linux';
+                        else if (name.includes('exe_mac')) os = 'macOS';
+                    }}
 
-                depots.push({
-                    depot_id: depotId,
-                    os: os,
-                    language: language,
-                    name: name
-                });
-            });
-            return depots;
-        })();
+                    depots.push({{
+                        depot_id: depotId,
+                        os: os,
+                        language: language,
+                        name: name
+                    }});
+                }});
+                return depots;
+            }}
+
+            {self.get_block_detection_js()}
+
+            return []; // Valid SteamDB page, just no depots found.
+        }})();
         """
 
-    def process_result(self, result: Any) -> List[Dict[str, Any]]:
+    def process_result(self, result: Any) -> Any:
+        result = super().process_result(result)
+        if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
+            return result
         if not isinstance(result, list):
             return []
         return result
@@ -170,28 +183,39 @@ class ManifestsParsingTask(SteamDBTask):
     target_type = "depot"
 
     def get_js_code(self) -> str:
-        return """
-        (function() {
-            const manifests = [];
-            const rows = document.querySelectorAll('#manifests tbody tr');
-            rows.forEach(row => {
-                const dateCell = row.querySelector('td:nth-child(1)');
-                const relativeDateCell = row.querySelector('td:nth-child(2)');
-                const manifestIdCell = row.querySelector('td:nth-child(3) a');
-                
-                if (dateCell && relativeDateCell && manifestIdCell) {
-                    manifests.push({
-                        seen_date: dateCell.textContent.trim(),
-                        relative_date: relativeDateCell.getAttribute('data-time'),
-                        manifest_id: manifestIdCell.textContent.trim()
-                    });
-                }
-            });
-            return manifests;
-        })();
+        return f"""
+        (function() {{
+            const manifestTable = document.querySelector('#manifests');
+            
+            if (manifestTable) {{
+                const manifests = [];
+                const rows = manifestTable.querySelectorAll('tbody tr');
+                rows.forEach(row => {{
+                    const dateCell = row.querySelector('td:nth-child(1)');
+                    const relativeDateCell = row.querySelector('td:nth-child(2)');
+                    const manifestIdCell = row.querySelector('td:nth-child(3) a');
+                    
+                    if (dateCell && relativeDateCell && manifestIdCell) {{
+                        manifests.push({{
+                            seen_date: dateCell.textContent.trim(),
+                            relative_date: relativeDateCell.getAttribute('data-time'),
+                            manifest_id: manifestIdCell.textContent.trim()
+                        }});
+                    }}
+                }});
+                return manifests;
+            }}
+
+            {self.get_block_detection_js()}
+
+            return []; // Valid SteamDB, just no manifests table.
+        }})();
         """
 
-    def process_result(self, result: Any) -> List[Dict[str, Any]]:
+    def process_result(self, result: Any) -> Any:
+        result = super().process_result(result)
+        if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
+            return result
         if not isinstance(result, list):
             return []
         return result

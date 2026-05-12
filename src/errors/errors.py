@@ -33,3 +33,7 @@ class ForeignKeyError(DatabaseError):
     """Foreign key constraint error."""
 
     category = "foreign_key_error"
+
+
+class SubprocessError(SteamDepoterError):
+    """Subprocess operation failed."""

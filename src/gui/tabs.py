@@ -63,8 +63,7 @@ class BaseTab(QWidget):
         btn.clicked.connect(callback)
         return btn
 
-    def _get_selected_item(self):
-        """Get selected item from tree view."""
+    def _get_selected_item(self) -> object:
         current_index = self.tree_view.currentIndex()
         if not current_index.isValid():
             QMessageBox.warning(self, "Error", "Please select an item")
@@ -79,13 +78,11 @@ class BaseTab(QWidget):
 
 
 class GamesTab(BaseTab):
-    """Tab for displaying games with expandable depots."""
 
     def get_service(self):
         return GameService(self.session)
 
     def refresh_data(self) -> None:
-        """Load games from database and update tree view."""
         service = self.get_service()
         games = service.get_all_games()
         model = SQLAlchemyTreeModel(
@@ -97,13 +94,12 @@ class GamesTab(BaseTab):
         self.tree_view.expandAll()
 
     def on_add(self) -> None:
-        """Add a new game."""
         dialog = GameDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
             try:
                 service = self.get_service()
-                service.create_game(data["app_id"], data["name"])
+                service.create_game(props=data)
                 self.refresh_data()
                 QMessageBox.information(self, "Success", f"Game '{data['name']}' added successfully!")
             except Exception as e:
@@ -133,13 +129,11 @@ class GamesTab(BaseTab):
 
 
 class DepotsTab(BaseTab):
-    """Tab for displaying depots with expandable manifests."""
 
     def get_service(self):
         return DepotService(self.session)
 
     def refresh_data(self) -> None:
-        """Load depots from database and update tree view."""
         service = self.get_service()
         depots = service.get_all_depots()
         model = SQLAlchemyTreeModel(
@@ -151,8 +145,6 @@ class DepotsTab(BaseTab):
         self.tree_view.expandAll()
 
     def on_add(self) -> None:
-        """Add a new depot."""
-        # Get list of available app IDs
         try:
             game_service = GameService(self.session)
             games = game_service.get_all_games()
@@ -171,14 +163,13 @@ class DepotsTab(BaseTab):
             data = dialog.get_data()
             try:
                 service = self.get_service()
-                service.create_depot(data["depot_id"], data["app_id"], data["name"])
+                service.create_depot(props=data)
                 self.refresh_data()
                 QMessageBox.information(self, "Success", f"Depot '{data['name']}' added successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Add Depot")
 
     def on_delete(self) -> None:
-        """Delete selected depot."""
         depot = self._get_selected_item()
         if not depot:
             return

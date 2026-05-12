@@ -17,7 +17,6 @@ class BaseService:
         self.session = session
 
     def _handle_db_error(self, error: Exception) -> None:
-        """Convert database errors to domain errors."""
         error_str = str(error)
 
         if isinstance(error, IntegrityError):
@@ -34,7 +33,6 @@ class BaseService:
         raise error
 
     def _create(self, model: type, **kwargs):
-        """Generic create operation with error handling."""
         try:
             obj = model(**kwargs)
             self.session.add(obj)
@@ -45,14 +43,12 @@ class BaseService:
             self._handle_db_error(e)
 
     def _get_all(self, model: type) -> List:
-        """Generic get all operation."""
         try:
             return self.session.query(model).all()
         except SQLAlchemyError as e:
             raise DatabaseError(f"Failed to fetch {model.__name__}: {str(e)}")
 
     def _delete(self, model: type, id_value: int) -> None:
-        """Generic delete operation."""
         try:
             obj = self.session.query(model).filter(model.id == id_value).first()
             if not obj:
@@ -66,24 +62,9 @@ class BaseService:
 
 
 class GameService(BaseService):
-    """Service for Game operations."""
 
-    def create_game(self, app_id: str, name: str) -> Any | None:
-        """Create a new game.
-
-        Args:
-            app_id: Steam app ID
-            name: Game name
-
-        Returns:
-            Created Game object
-
-        Raises:
-            ValueError: If validation fails
-            DuplicateError: If app_id already exists
-            DatabaseError: If database operation fails
-        """
-        data = GameCreate(app_id=app_id, name=name)
+    def create_game(self, props: dict) -> Any | None:
+        data = GameCreate(**props)
         return self._create(Game, app_id=data.app_id, name=data.name)
 
     def get_all_games(self) -> List[Game]:
@@ -91,41 +72,14 @@ class GameService(BaseService):
         return self._get_all(Game)
 
     def delete_game(self, game_id: int) -> None:
-        """Delete a game and cascade delete its depots.
-
-        Args:
-            game_id: Game ID
-
-        Raises:
-            NotFoundError: If game not found
-            DatabaseError: If deletion fails
-        """
         self._delete(Game, game_id)
 
 
 class DepotService(BaseService):
-    """Service for Depot operations."""
 
-    def create_depot(self, depot_id: str, app_id: str, name: str) -> Any | None:
-        """Create a new depot.
+    def create_depot(self, props: dict) -> Any | None:
+        data = DepotCreate(**props)
 
-        Args:
-            depot_id: Depot ID
-            app_id: Associated game app_id (must exist)
-            name: Depot name
-
-        Returns:
-            Created Depot object
-
-        Raises:
-            ValueError: If validation fails
-            DuplicateError: If depot_id already exists
-            ForeignKeyError: If app_id doesn't exist
-            DatabaseError: If database operation fails
-        """
-        data = DepotCreate(depot_id=depot_id, app_id=app_id, name=name)
-
-        # Verify game exists before creating depot
         game = self.session.query(Game).filter(Game.app_id == data.app_id).first()
         if not game:
             raise ForeignKeyError(f"Game with app_id '{data.app_id}' not found")
@@ -133,17 +87,7 @@ class DepotService(BaseService):
         return self._create(Depot, depot_id=data.depot_id, app_id=data.app_id, name=data.name)
 
     def get_all_depots(self) -> List[Depot]:
-        """Get all depots."""
         return self._get_all(Depot)
 
     def delete_depot(self, depot_id: int) -> None:
-        """Delete a depot.
-
-        Args:
-            depot_id: Depot ID
-
-        Raises:
-            NotFoundError: If depot not found
-            DatabaseError: If deletion fails
-        """
         self._delete(Depot, depot_id)

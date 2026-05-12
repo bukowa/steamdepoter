@@ -35,8 +35,8 @@ class MainWindow(QMainWindow):
         # Console Panel
         self.console = ConsolePanel()
 
-        self.games_tab = GamesTab(self.session, self.console)
-        self.depots_tab = DepotsTab(self.session, self.console)
+        self.games_tab = GamesTab(self.session, self.console, self.db)
+        self.depots_tab = DepotsTab(self.session, self.console, self.db)
 
         self.tabs.addTab(self.games_tab, "Games")
         self.tabs.addTab(self.depots_tab, "Depots")

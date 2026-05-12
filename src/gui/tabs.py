@@ -1,12 +1,12 @@
 """Tab widgets for different views."""
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeView, QMessageBox, QDialog, QMenu
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox, QDialog, QMenu
 )
 from PyQt6.QtCore import Qt
 from sqlalchemy.orm import Session
 
 from src.services import GameService, DepotService, ManifestService
-from src.gui.models import SQLAlchemyTreeModel
+from src.db.database import Database
 from src.gui.dialogs import GameDialog, DepotDialog
 from src.gui.workers import CommandWorker
 from src.bins.depotdownloader import DepotDownloader
@@ -16,10 +16,11 @@ from src.errors.exceptions_handler import show_error
 class BaseTab(QWidget):
     """Base tab with common CRUD operations."""
 
-    def __init__(self, session: Session, console=None):
+    def __init__(self, session: Session, console=None, db: Database = None):
         super().__init__()
         self.session = session
         self.console = console
+        self.db = db
         self.tree_view = None
         self.init_ui()
 
@@ -53,7 +54,8 @@ class BaseTab(QWidget):
         toolbar.addWidget(ref_btn)
         toolbar.addStretch()
 
-        self.tree_view = QTreeView()
+        self.tree_view = QTreeWidget()
+        self.tree_view.setAlternatingRowColors(True)
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(self.on_context_menu)
         
@@ -75,17 +77,17 @@ class BaseTab(QWidget):
         return btn
 
     def _get_selected_item(self) -> object:
-        current_index = self.tree_view.currentIndex()
-        if not current_index.isValid():
+        item = self.tree_view.currentItem()
+        if not item:
             QMessageBox.warning(self, "Error", "Please select an item")
             return None
 
-        item = current_index.internalPointer()
-        if item.data is None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data is None:
             QMessageBox.warning(self, "Error", "Invalid selection")
             return None
 
-        return item.data
+        return data
 
 
 class GamesTab(BaseTab):
@@ -94,28 +96,46 @@ class GamesTab(BaseTab):
         return GameService(self.session)
 
     def refresh_data(self) -> None:
+        self.tree_view.clear()
+        self.tree_view.setHeaderLabels(["App ID", "Name"])
+        
         service = self.get_service()
         games = service.get_all_games()
-        model = SQLAlchemyTreeModel(
-            games,
-            columns=["app_id", "name"],
-            relationship_attr="depots"
-        )
-        self.tree_view.setModel(model)
+        
+        for game in games:
+            game_item = QTreeWidgetItem(self.tree_view)
+            game_item.setText(0, str(game.app_id))
+            game_item.setText(1, game.name)
+            game_item.setData(0, Qt.ItemDataRole.UserRole, game)
+            game_item.setText(0, f"📁 {game.app_id}") # Add icon emoji
+            
+            for depot in game.depots:
+                depot_item = QTreeWidgetItem(game_item)
+                depot_item.setText(0, str(depot.depot_id))
+                depot_item.setText(1, depot.name)
+                depot_item.setData(0, Qt.ItemDataRole.UserRole, depot)
+                depot_item.setText(0, f"📦 {depot.depot_id}")
+
         self.tree_view.expandAll()
+        for i in range(self.tree_view.columnCount()):
+            self.tree_view.resizeColumnToContents(i)
 
     def on_context_menu(self, point) -> None:
-        index = self.tree_view.indexAt(point)
-        if not index.isValid():
+        item = self.tree_view.itemAt(point)
+        if not item:
             return
 
-        item = index.internalPointer()
-        if not item or not hasattr(item.data, 'app_id'):
+        # Check if it's a game (top-level item)
+        if item.parent() is not None:
+            return
+
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or not hasattr(data, 'app_id'):
             return
 
         menu = QMenu(self)
         parse_action = menu.addAction("Parse Manifests (get_depots)")
-        parse_action.triggered.connect(lambda: self.on_parse_manifests(item.data))
+        parse_action.triggered.connect(lambda: self.on_parse_manifests(data))
         
         menu.exec(self.tree_view.mapToGlobal(point))
 
@@ -126,13 +146,25 @@ class GamesTab(BaseTab):
         downloader = DepotDownloader()
         
         def on_finished(output):
-            try:
-                # Note: In a real app, we might need a thread-safe way to use the session
-                service = ManifestService(self.session)
-                service.save_manifests(game.app_id, output.manifests)
-                # We could refresh DepotsTab here if we had a reference to it
-            except Exception as e:
-                print(f"Failed to save manifests: {e}")
+            # Use a fresh session for background task to avoid crashes
+            if self.db:
+                new_session = self.db.get_session()
+                try:
+                    service = ManifestService(new_session)
+                    service.save_manifests(game.app_id, output.manifests)
+                    # Use QTimer or similar if we wanted to refresh UI from here, 
+                    # but for now let's just log or rely on manual refresh
+                except Exception as e:
+                    print(f"Failed to save manifests: {e}")
+                finally:
+                    new_session.close()
+            else:
+                # Fallback to current session (risky)
+                try:
+                    service = ManifestService(self.session)
+                    service.save_manifests(game.app_id, output.manifests)
+                except Exception as e:
+                    print(f"Failed to save manifests (shared session): {e}")
 
         worker = CommandWorker(downloader.get_depots, app_id=int(game.app_id))
         worker.finished.connect(on_finished)
@@ -180,15 +212,21 @@ class DepotsTab(BaseTab):
         return DepotService(self.session)
 
     def refresh_data(self) -> None:
+        self.tree_view.clear()
+        self.tree_view.setHeaderLabels(["Depot ID", "Name", "App ID"])
+        
         service = self.get_service()
         depots = service.get_all_depots()
-        model = SQLAlchemyTreeModel(
-            depots,
-            columns=["depot_id", "name", "app_id"],
-            relationship_attr=None  # TODO: Add manifests relationship
-        )
-        self.tree_view.setModel(model)
-        self.tree_view.expandAll()
+        
+        for depot in depots:
+            item = QTreeWidgetItem(self.tree_view)
+            item.setText(0, f"📦 {depot.depot_id}")
+            item.setText(1, depot.name)
+            item.setText(2, str(depot.app_id))
+            item.setData(0, Qt.ItemDataRole.UserRole, depot)
+
+        for i in range(self.tree_view.columnCount()):
+            self.tree_view.resizeColumnToContents(i)
 
     def on_add(self) -> None:
         try:

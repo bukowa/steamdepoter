@@ -38,6 +38,10 @@ class MainWindow(QMainWindow):
         self.games_tab = GamesTab(self.session, self.console, self.db)
         self.depots_tab = DepotsTab(self.session, self.console, self.db)
 
+        # Connect signals for automatic refresh
+        self.games_tab.data_changed.connect(self.refresh_all_tabs)
+        self.depots_tab.data_changed.connect(self.refresh_all_tabs)
+
         self.tabs.addTab(self.games_tab, "Games")
         self.tabs.addTab(self.depots_tab, "Depots")
 
@@ -48,6 +52,12 @@ class MainWindow(QMainWindow):
         splitter.setSizes([560, 240])
 
         layout.addWidget(splitter)
+
+    def refresh_all_tabs(self):
+        """Refresh data in all tabs and ensure session is up to date."""
+        self.session.expire_all()
+        self.games_tab.refresh_data()
+        self.depots_tab.refresh_data()
 
     def init_menu(self):
         menubar = self.menuBar()

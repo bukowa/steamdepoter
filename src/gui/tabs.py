@@ -2,7 +2,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox, QDialog, QMenu
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from sqlalchemy.orm import Session
 
 from src.services import GameService, DepotService, ManifestService
@@ -15,6 +15,7 @@ from src.errors.exceptions_handler import show_error
 
 class BaseTab(QWidget):
     """Base tab with common CRUD operations."""
+    data_changed = pyqtSignal()
 
     def __init__(self, session: Session, console=None, db: Database = None):
         super().__init__()
@@ -32,6 +33,11 @@ class BaseTab(QWidget):
         """Load and display data. Must be overridden by subclass."""
         raise NotImplementedError("Subclass must implement refresh_data()")
 
+    def _manual_refresh(self) -> None:
+        """Manually refresh data, ensuring session is up to date."""
+        self.session.expire_all()
+        self.refresh_data()
+
     def on_add(self) -> None:
         """Handle add action. Must be overridden by subclass."""
         raise NotImplementedError("Subclass must implement on_add()")
@@ -47,7 +53,7 @@ class BaseTab(QWidget):
         toolbar = QHBoxLayout()
         add_btn = self._make_button("Add", self.on_add)
         del_btn = self._make_button("Delete", self.on_delete)
-        ref_btn = self._make_button("Refresh", self.refresh_data)
+        ref_btn = self._make_button("Refresh", self._manual_refresh)
 
         toolbar.addWidget(add_btn)
         toolbar.addWidget(del_btn)
@@ -152,8 +158,7 @@ class GamesTab(BaseTab):
                 try:
                     service = ManifestService(new_session)
                     service.save_manifests(game.app_id, output.manifests)
-                    # Use QTimer or similar if we wanted to refresh UI from here, 
-                    # but for now let's just log or rely on manual refresh
+                    self.data_changed.emit()
                 except Exception as e:
                     print(f"Failed to save manifests: {e}")
                 finally:
@@ -163,6 +168,7 @@ class GamesTab(BaseTab):
                 try:
                     service = ManifestService(self.session)
                     service.save_manifests(game.app_id, output.manifests)
+                    self.data_changed.emit()
                 except Exception as e:
                     print(f"Failed to save manifests (shared session): {e}")
 
@@ -178,7 +184,7 @@ class GamesTab(BaseTab):
             try:
                 service = self.get_service()
                 service.create_game(props=data)
-                self.refresh_data()
+                self.data_changed.emit()
                 QMessageBox.information(self, "Success", f"Game '{data['name']}' added successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Add Game")
@@ -200,7 +206,7 @@ class GamesTab(BaseTab):
             try:
                 service = self.get_service()
                 service.delete_game(game.id)
-                self.refresh_data()
+                self.data_changed.emit()
                 QMessageBox.information(self, "Success", "Game deleted successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Delete Game")
@@ -248,7 +254,7 @@ class DepotsTab(BaseTab):
             try:
                 service = self.get_service()
                 service.create_depot(props=data)
-                self.refresh_data()
+                self.data_changed.emit()
                 QMessageBox.information(self, "Success", f"Depot '{data['name']}' added successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Add Depot")
@@ -269,7 +275,7 @@ class DepotsTab(BaseTab):
             try:
                 service = self.get_service()
                 service.delete_depot(depot.id)
-                self.refresh_data()
+                self.data_changed.emit()
                 QMessageBox.information(self, "Success", "Depot deleted successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Delete Depot")

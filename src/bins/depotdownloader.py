@@ -2,12 +2,13 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional, Callable, List, Dict
+from typing import Optional, Callable, List, Dict, Any
 from dataclasses import dataclass, field
 
 from src.logger import logger
 from src.errors.errors import SubprocessError
 from src.bins.runner import CommandRunner, BinOutput
+from src.settings import Configurable, settings
 
 @dataclass
 class ManifestFile:
@@ -36,18 +37,25 @@ class DepotManifestsOutput(BinOutput):
     manifest_path: Path
     manifests: Dict[int, Manifest] = field(default_factory=dict)
 
-class DepotDownloader:
+class DepotDownloader(Configurable):
     """
     A wrapper for the DepotDownloader binary to interact with Steam depots.
     """
+
+    @classmethod
+    def get_setting_keys(cls) -> Dict[str, Any]:
+        return {
+            "username": "",
+            "password": ""
+        }
 
     def __init__(
         self,
         binary_path: Optional[str] = None,
         data_path: Optional[str] = None,
         debug: bool = False,
-        username: str = "anonymous",
-        password: str = ""
+        username: Optional[str] = None,
+        password: Optional[str] = None
     ):
         if not binary_path:
             binary_name = "DepotDownloader.exe" if sys.platform == "win32" else "DepotDownloader"
@@ -57,8 +65,11 @@ class DepotDownloader:
         self.root_data_path = Path(data_path or Path("data/depotdownloader"))
         self.manifests_data_path = self.root_data_path / "manifests"
         self.debug = debug
-        self.username = username
-        self.password = password
+        
+        # Use settings if not provided
+        self.username = username or settings.get("DepotDownloader", "username")
+        self.password = password or settings.get("DepotDownloader", "password")
+        
         self.runner = CommandRunner()
 
     def _parse_manifest_file(self, file_path: Path) -> Optional[Manifest]:

@@ -1,21 +1,25 @@
 """Tab widgets for different views."""
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeView, QMessageBox, QDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeView, QMessageBox, QDialog, QMenu
 )
+from PyQt6.QtCore import Qt
 from sqlalchemy.orm import Session
 
-from src.services import GameService, DepotService
+from src.services import GameService, DepotService, ManifestService
 from src.gui.models import SQLAlchemyTreeModel
 from src.gui.dialogs import GameDialog, DepotDialog
+from src.gui.workers import CommandWorker
+from src.bins.depotdownloader import DepotDownloader
 from src.errors.exceptions_handler import show_error
 
 
 class BaseTab(QWidget):
     """Base tab with common CRUD operations."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, console=None):
         super().__init__()
         self.session = session
+        self.console = console
         self.tree_view = None
         self.init_ui()
 
@@ -50,11 +54,18 @@ class BaseTab(QWidget):
         toolbar.addStretch()
 
         self.tree_view = QTreeView()
+        self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree_view.customContextMenuRequested.connect(self.on_context_menu)
+        
         self.refresh_data()
 
         layout.addLayout(toolbar)
         layout.addWidget(self.tree_view)
         self.setLayout(layout)
+
+    def on_context_menu(self, point) -> None:
+        """Handle context menu. Can be overridden by subclass."""
+        pass
 
     @staticmethod
     def _make_button(label: str, callback) -> QPushButton:
@@ -92,6 +103,41 @@ class GamesTab(BaseTab):
         )
         self.tree_view.setModel(model)
         self.tree_view.expandAll()
+
+    def on_context_menu(self, point) -> None:
+        index = self.tree_view.indexAt(point)
+        if not index.isValid():
+            return
+
+        item = index.internalPointer()
+        if not item or not hasattr(item.data, 'app_id'):
+            return
+
+        menu = QMenu(self)
+        parse_action = menu.addAction("Parse Manifests (get_depots)")
+        parse_action.triggered.connect(lambda: self.on_parse_manifests(item.data))
+        
+        menu.exec(self.tree_view.mapToGlobal(point))
+
+    def on_parse_manifests(self, game) -> None:
+        if not self.console:
+            return
+
+        downloader = DepotDownloader()
+        
+        def on_finished(output):
+            try:
+                # Note: In a real app, we might need a thread-safe way to use the session
+                service = ManifestService(self.session)
+                service.save_manifests(game.app_id, output.manifests)
+                # We could refresh DepotsTab here if we had a reference to it
+            except Exception as e:
+                print(f"Failed to save manifests: {e}")
+
+        worker = CommandWorker(downloader.get_depots, app_id=int(game.app_id))
+        worker.finished.connect(on_finished)
+        
+        self.console.add_command(worker, f"Get Depots: {game.name}")
 
     def on_add(self) -> None:
         dialog = GameDialog(self)
@@ -189,4 +235,3 @@ class DepotsTab(BaseTab):
                 QMessageBox.information(self, "Success", "Depot deleted successfully!")
             except Exception as e:
                 show_error(self, e, "Failed to Delete Depot")
-

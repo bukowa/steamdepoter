@@ -62,8 +62,7 @@ class CommandRunner:
         self,
         command: List[str],
         sensitive_values: Optional[List[str]] = None,
-        on_output: Optional[Callable[[str], None]] = None,
-        is_cancelled: Optional[Callable[[], bool]] = None
+        on_output: Optional[Callable[[str], None]] = None
     ) -> BinOutput:
         """
         Executes a command and captures its output.
@@ -72,7 +71,6 @@ class CommandRunner:
             command: The command and its arguments as a list of strings.
             sensitive_values: A list of values that should be masked with '***' in logs and BinOutput.
             on_output: An optional callback that receives each character of the output in real-time.
-            is_cancelled: An optional callback that returns True if the command should be cancelled.
 
         Returns:
             A BinOutput object containing the execution results.
@@ -109,9 +107,8 @@ class CommandRunner:
                 self._proc = proc
                 if proc.stdout:
                     while True:
-                        if self._stopped or (is_cancelled and is_cancelled()):
-                            logger.info("Runner stopped or cancellation requested, killing process.")
-                            self._stopped = True # Ensure it's marked as stopped if it came from callback
+                        if self._stopped:
+                            logger.info("Runner stopped, killing process.")
                             proc.kill()
                             break
 

@@ -183,8 +183,7 @@ class DepotDownloader(Configurable):
             output = self.runner.run(
                 command,
                 sensitive_values=sensitive_values,
-                on_output=on_output,
-                is_cancelled=is_cancelled
+                on_output=on_output
             )
             
             combined_output += output.stdout + "\n"

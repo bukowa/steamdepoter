@@ -90,6 +90,8 @@ class DepotsParsingTask(SteamDBTask):
         return f"""
         (function() {{
             const rows = document.querySelectorAll('tr.depot');
+            const nameElement = document.querySelector('h1[itemprop="name"]');
+            const appName = nameElement ? nameElement.textContent.trim() : null;
             
             if (rows.length > 0) {{
                 const depots = [];
@@ -128,12 +130,18 @@ class DepotsParsingTask(SteamDBTask):
                         name: name
                     }});
                 }});
-                return depots;
+                return {{
+                    name: appName,
+                    depots: depots
+                }};
             }}
 
             {self.get_block_detection_js()}
 
-            return []; // Valid SteamDB page, just no depots found.
+            return {{
+                name: appName,
+                depots: []
+            }};
         }})();
         """
 
@@ -141,22 +149,31 @@ class DepotsParsingTask(SteamDBTask):
         result = super().process_result(result)
         if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
             return result
-        if not isinstance(result, list):
-            return []
+        if not isinstance(result, dict):
+            return {"name": None, "depots": []}
         return result
 
-    def save_result(self, session: Session, result: List[Dict[str, Any]]) -> str:
-        if not result:
-            return "No depots found or parsing failed"
+    def save_result(self, session: Session, result: Dict[str, Any]) -> str:
+        depots = result.get('depots', [])
+        app_name = result.get('name')
+
+        if not self.target_id:
+            raise ValueError("App ID is required to save depots.")
+
+        # Update game name if found
+        if app_name:
+            from src.services import GameService
+            game_service = GameService(session)
+            game_service.update_game(self.target_id, {'name': app_name})
+
+        if not depots:
+            return f"Updated game name to '{app_name}' (no depots found)" if app_name else "No depots found or parsing failed"
 
         depot_service = DepotService(session)
         count = 0
-        for depot_data in result:
+        for depot_data in depots:
             depot_id = depot_data['depot_id']
             
-            if not self.target_id:
-                raise ValueError("App ID is required to save depots.")
-
             depot = session.query(Depot).filter(Depot.depot_id == depot_id).first()
             if depot:
                 depot_service.update_depot(depot_id, {
@@ -173,7 +190,10 @@ class DepotsParsingTask(SteamDBTask):
                 })
             count += 1
         
-        return f"Updated/Created {count} depots"
+        msg = f"Updated/Created {count} depots"
+        if app_name:
+            msg = f"Updated game name to '{app_name}' and " + msg.lower()
+        return msg
 
 
 class ManifestsParsingTask(SteamDBTask):

@@ -89,6 +89,21 @@ class GameService(BaseService):
         """Batch delete games."""
         self._delete_many(Game, game_ids)
 
+    def update_game(self, app_id: str, props: dict) -> None:
+        """Update game properties."""
+        try:
+            game = self.session.query(Game).filter(Game.app_id == app_id).first()
+            if not game:
+                raise NotFoundError(f"Game {app_id} not found")
+
+            if 'name' in props and props['name']:
+                game.name = props['name']
+
+            self.session.commit()
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to update game {app_id}: {str(e)}")
+
 
 class DepotService(BaseService):
 

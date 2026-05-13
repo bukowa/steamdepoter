@@ -85,6 +85,47 @@ class SettingsManager:
         """Returns all settings for UI editing."""
         return self._settings
 
+    def migrate_library_hide_patterns_from_qsettings(self) -> None:
+        """One-time: old QSettings pattern list -> ``globals.library_hide_patterns``."""
+        if self.get("globals", "library_hide_patterns"):
+            return
+        try:
+            from PyQt6.QtCore import QSettings
+        except Exception:
+            return
+
+        qs = QSettings()
+        legacy = qs.value("files/non_binary_ext_lines", "")
+        wrote = False
+        if isinstance(legacy, str) and legacy.strip():
+            lines_out: list[str] = []
+            for raw in legacy.splitlines():
+                t = raw.strip()
+                if not t or t.startswith("#"):
+                    continue
+                if any(c in t for c in "*?["):
+                    lines_out.append(t)
+                else:
+                    tok = t.lstrip(".").lower()
+                    if tok:
+                        lines_out.append(f"**/*.{tok}")
+            if lines_out:
+                self.set_global("library_hide_patterns", "\n".join(lines_out))
+                wrote = True
+
+        legacy_en = qs.value("files/hide_non_binary", None)
+        if legacy_en is not None and self.get("globals", "library_hide_patterns_enabled") is None:
+            if isinstance(legacy_en, str):
+                en = legacy_en.strip().lower() not in ("0", "false", "no", "off")
+            else:
+                en = bool(legacy_en)
+            self.set_global("library_hide_patterns_enabled", en)
+            wrote = True
+
+        if wrote or legacy_en is not None:
+            qs.remove("files/non_binary_ext_lines")
+            qs.remove("files/hide_non_binary")
+
     def _load(self):
         """Loads settings from JSON."""
         if self._config_path.exists():

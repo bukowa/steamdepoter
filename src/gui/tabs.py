@@ -1,15 +1,17 @@
 """Tab widgets for different views."""
 import random
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QMessageBox, QDialog, QLineEdit, QLabel,
     QListWidget, QListWidgetItem, QSplitter,
-    QListView, QSizePolicy,
+    QTableView, QSizePolicy, QHeaderView, QAbstractItemView,
+    QToolButton, QMenu, QPlainTextEdit, QGroupBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QThread, QStringListModel
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QThread, QAbstractTableModel, QModelIndex, QTimer
+from PyQt6.QtGui import QAction, QFont, QShortcut, QKeySequence
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from sqlalchemy.orm import Session
@@ -23,9 +25,17 @@ from src.bins.depotdownloader import DepotDownloader
 from src.errors.exceptions_handler import show_error
 from src.steamdb_tasks import DepotsParsingTask, ManifestsParsingTask
 
+from src import manifest_filters
+from src.settings import settings
+from src.steam_manifest_flags import DEPOT_FILE_FLAG_DIRECTORY, is_directory_entry
+
+
+# Table row: path, size_bytes, manifest_id, sha (empty string if missing)
+_FileTableRow = Tuple[str, int, str, str]
+
 
 class _ManifestFileListLoader(QThread):
-    """Background load of manifest file paths (own DB session; not UI-thread safe)."""
+    """Background load of manifest file rows (own DB session; not UI-thread safe)."""
 
     loaded = pyqtSignal(list)
     failed = pyqtSignal(str)
@@ -40,7 +50,7 @@ class _ManifestFileListLoader(QThread):
             self.loaded.emit([])
             return
         try:
-            from sqlalchemy import create_engine
+            from sqlalchemy import create_engine, func
             from sqlalchemy.orm import sessionmaker
 
             engine = create_engine(
@@ -51,22 +61,100 @@ class _ManifestFileListLoader(QThread):
             Session = sessionmaker(bind=engine, expire_on_commit=False)
             session = Session()
             try:
+                nondir = (func.coalesce(ManifestFile.flags, 0).op("&")(DEPOT_FILE_FLAG_DIRECTORY)) == 0
                 q = (
-                    session.query(ManifestFile.name)
-                    .filter(ManifestFile.manifest_id.in_(self._manifest_ids))
+                    session.query(
+                        ManifestFile.name,
+                        ManifestFile.size,
+                        ManifestFile.manifest_id,
+                        ManifestFile.sha,
+                    )
+                    .filter(ManifestFile.manifest_id.in_(self._manifest_ids), nondir)
                     .order_by(ManifestFile.name)
                 )
-                names: List[str] = []
-                for (name,) in q.yield_per(4000):
+                rows: List[_FileTableRow] = []
+                for name, size, mid, sha in q.yield_per(4000):
                     if self.isInterruptionRequested():
                         return
-                    names.append(name)
-                self.loaded.emit(names)
+                    sz = int(size) if size is not None else 0
+                    rows.append((name, sz, str(mid), (sha or "").strip()))
+                self.loaded.emit(rows)
             finally:
                 session.close()
                 engine.dispose()
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class _ManifestFileTableModel(QAbstractTableModel):
+    """Lightweight read-only table: Path, Size (MB), Manifest, SHA."""
+
+    _HEADERS = ("Path", "Size (MB)", "Manifest", "SHA")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: List[_FileTableRow] = []
+
+    def set_rows(self, rows: List[_FileTableRow]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._HEADERS)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        name, size_b, mid, sha = self._rows[index.row()]
+        col = index.column()
+        if role == Qt.ItemDataRole.DisplayRole:
+            if col == 0:
+                return name
+            if col == 1:
+                return self._format_mb(size_b)
+            if col == 2:
+                return mid
+            if col == 3:
+                return sha
+        if role == Qt.ItemDataRole.TextAlignmentRole and col == 1:
+            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            if 0 <= section < len(self._HEADERS):
+                return self._HEADERS[section]
+        return None
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder) -> None:
+        if not self._rows:
+            return
+        reverse = order == Qt.SortOrder.DescendingOrder
+
+        def key(row: _FileTableRow):
+            name, size_b, mid, sha = row
+            if column == 0:
+                return name.lower()
+            if column == 1:
+                return size_b
+            if column == 2:
+                return mid
+            return sha.lower()
+
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(key=key, reverse=reverse)
+        self.layoutChanged.emit()
+
+    @staticmethod
+    def _format_mb(size_bytes: int) -> str:
+        if size_bytes <= 0:
+            return "0.00"
+        mb = size_bytes / (1024 * 1024)
+        return f"{mb:.2f}"
 
 
 class LibraryTab(QWidget):
@@ -85,6 +173,7 @@ class LibraryTab(QWidget):
         self.db = db
         self._file_list_generation = 0
         self._file_loader: Optional[_ManifestFileListLoader] = None
+        self._cached_file_rows: List[_FileTableRow] = []
         self.init_ui()
 
     def init_ui(self) -> None:
@@ -116,7 +205,7 @@ class LibraryTab(QWidget):
 
         self.tree_view.itemSelectionChanged.connect(self._on_tree_selection_changed)
 
-        # Left: toolbar + tree; right: manifest file list (virtualized via QListView)
+        # Left: toolbar + tree; right: manifest file table (virtualized via QTableView)
         left = QWidget()
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
@@ -129,18 +218,86 @@ class LibraryTab(QWidget):
         self._file_pane_title = QLabel("Files")
         self._file_pane_status = QLabel("Select a game, depot, or manifest in the tree.")
         self._file_pane_status.setWordWrap(True)
-        self._file_list_view = QListView()
-        self._file_list_model = QStringListModel(self)
-        self._file_list_view.setModel(self._file_list_model)
-        self._file_list_view.setUniformItemSizes(True)
-        self._file_list_view.setAlternatingRowColors(True)
-        self._file_list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._file_list_view.setSizePolicy(
+
+        self._file_pane_options_btn = QToolButton()
+        self._file_pane_options_btn.setText("Options")
+        self._file_pane_options_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._file_pane_options_menu = QMenu(self._file_pane_options_btn)
+        self._act_filter_non_binary = QAction("Hide paths matching patterns below", self)
+        self._act_filter_non_binary.setCheckable(True)
+        self._act_filter_non_binary.setChecked(True)
+        self._act_filter_non_binary.toggled.connect(self._on_hide_patterns_filter_toggled)
+        self._file_pane_options_menu.addAction(self._act_filter_non_binary)
+        self._act_restore_suffix_defaults = QAction("Restore bundled default patterns", self)
+        self._act_restore_suffix_defaults.triggered.connect(self._on_restore_default_hide_patterns)
+        self._file_pane_options_menu.addAction(self._act_restore_suffix_defaults)
+        self._file_pane_options_btn.setMenu(self._file_pane_options_menu)
+
+        file_pane_header = QHBoxLayout()
+        file_pane_header.setContentsMargins(0, 0, 0, 0)
+        file_pane_header.addWidget(self._file_pane_title)
+        file_pane_header.addStretch()
+        file_pane_header.addWidget(self._file_pane_options_btn)
+
+        self._file_table_model = _ManifestFileTableModel(self)
+        self._file_table_view = QTableView()
+        self._file_table_view.setModel(self._file_table_model)
+        self._file_table_view.setAlternatingRowColors(True)
+        self._file_table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._file_table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._file_table_view.setSortingEnabled(True)
+        self._file_table_view.setShowGrid(False)
+        self._file_table_view.verticalHeader().setVisible(False)
+        self._file_table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._file_table_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        right_l.addWidget(self._file_pane_title)
+        hh = self._file_table_view.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setMinimumSectionSize(64)
+
+        ext_group = QGroupBox(
+            "Hide patterns — Unix globs (pathlib), one per line; "
+            "prefix re: for regex. Preview refreshes shortly after you stop typing; Ctrl+S saves to data/settings.json. # comments"
+        )
+        ext_gl = QVBoxLayout(ext_group)
+        self._ext_plain = QPlainTextEdit()
+        self._ext_plain.setPlaceholderText(
+            "e.g. **/*.lua\n**/Content/Localization/**\nre:.*\\.txt$"
+        )
+        mono = QFont("Consolas")
+        if not mono.exactMatch():
+            mono = QFont("monospace")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self._ext_plain.setFont(mono)
+        self._ext_plain.setMinimumHeight(120)
+        self._ext_plain.setTabStopDistance(self._ext_plain.fontMetrics().horizontalAdvance(" ") * 4)
+        self._hide_patterns_debounce = QTimer(self)
+        self._hide_patterns_debounce.setSingleShot(True)
+        self._hide_patterns_debounce.setInterval(300)
+        self._hide_patterns_debounce.timeout.connect(self._flush_hide_patterns_editor_to_filter)
+        self._ext_plain.textChanged.connect(self._on_hide_patterns_text_changed)
+        ext_gl.addWidget(self._ext_plain)
+        self._pattern_save_notice = QLabel("")
+        self._pattern_save_notice.setStyleSheet("color: palette(mid);")
+        ext_gl.addWidget(self._pattern_save_notice)
+
+        self._sc_save_patterns = QShortcut(QKeySequence.StandardKey.Save, self._ext_plain)
+        self._sc_save_patterns.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_save_patterns.activated.connect(self._save_library_hide_patterns)
+
+        file_body_split = QSplitter(Qt.Orientation.Vertical)
+        file_body_split.addWidget(self._file_table_view)
+        file_body_split.addWidget(ext_group)
+        file_body_split.setStretchFactor(0, 5)
+        file_body_split.setStretchFactor(1, 1)
+        file_body_split.setSizes([480, 160])
+        right_l.addLayout(file_pane_header)
         right_l.addWidget(self._file_pane_status)
-        right_l.addWidget(self._file_list_view, stretch=1)
+        right_l.addWidget(file_body_split, stretch=1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
@@ -151,6 +308,7 @@ class LibraryTab(QWidget):
         layout.addWidget(splitter)
         self.setLayout(layout)
 
+        self._sync_hide_pattern_ui()
         self.refresh_data()
 
     @staticmethod
@@ -162,8 +320,87 @@ class LibraryTab(QWidget):
     def refresh_data(self) -> None:
         self.tree_view.load_games()
         self._cancel_file_loader()
-        self._file_list_model.setStringList([])
+        self._set_file_pane_cache([], update_counts_in_status=False)
         self._file_pane_status.setText("Select a game, depot, or manifest in the tree.")
+
+    def _sync_hide_pattern_ui(self) -> None:
+        self._hide_patterns_debounce.stop()
+        if not manifest_filters.get_patterns_text().strip():
+            manifest_filters.init_from_app_settings(settings)
+        self._ext_plain.blockSignals(True)
+        self._ext_plain.setPlainText(manifest_filters.get_patterns_text())
+        self._ext_plain.blockSignals(False)
+        self._act_filter_non_binary.setChecked(manifest_filters.is_hide_filter_enabled())
+
+    def _sync_manifest_filters_from_editor(self) -> None:
+        """Keep ``manifest_filters`` in sync with the pattern editor (cheap parse)."""
+        manifest_filters.set_patterns_from_text(self._ext_plain.toPlainText())
+
+    def _flush_hide_patterns_editor_to_filter(self) -> None:
+        """Apply editor patterns to the file table (after debounce)."""
+        self._sync_manifest_filters_from_editor()
+        self._apply_file_pane_filter(update_counts_in_status=True)
+
+    def _on_hide_patterns_filter_toggled(self, checked: bool) -> None:
+        self._hide_patterns_debounce.stop()
+        self._sync_manifest_filters_from_editor()
+        settings.set_global("library_hide_patterns_enabled", checked)
+        manifest_filters.set_hide_filter_enabled(checked)
+        self._apply_file_pane_filter(update_counts_in_status=True)
+
+    def _on_hide_patterns_text_changed(self) -> None:
+        text = self._ext_plain.toPlainText()
+        dirty = manifest_filters.patterns_text_is_dirty(text)
+        if dirty:
+            self._pattern_save_notice.setText("Unsaved changes — press Ctrl+S to write data/settings.json")
+        else:
+            self._pattern_save_notice.setText("")
+        self._hide_patterns_debounce.start()
+
+    def _save_library_hide_patterns(self) -> None:
+        self._hide_patterns_debounce.stop()
+        text = self._ext_plain.toPlainText()
+        manifest_filters.persist_patterns_to_disk(settings, text)
+        manifest_filters.set_patterns_from_text(text)
+        self._apply_file_pane_filter(update_counts_in_status=True)
+        self._pattern_save_notice.setText("Saved to data/settings.json")
+        QTimer.singleShot(3500, lambda: self._pattern_save_notice.setText(""))
+
+    def _on_restore_default_hide_patterns(self) -> None:
+        self._hide_patterns_debounce.stop()
+        doc = manifest_filters.default_patterns_document()
+        self._ext_plain.blockSignals(True)
+        self._ext_plain.setPlainText(doc)
+        self._ext_plain.blockSignals(False)
+        manifest_filters.set_patterns_from_text(doc)
+        manifest_filters.persist_patterns_to_disk(settings, doc)
+        self._apply_file_pane_filter(update_counts_in_status=True)
+        self._pattern_save_notice.setText("Restored defaults and saved.")
+        QTimer.singleShot(3500, lambda: self._pattern_save_notice.setText(""))
+
+    def _set_file_pane_cache(
+        self, rows: List[_FileTableRow], *, update_counts_in_status: bool = True
+    ) -> None:
+        self._hide_patterns_debounce.stop()
+        self._sync_manifest_filters_from_editor()
+        self._cached_file_rows = list(rows)
+        self._apply_file_pane_filter(update_counts_in_status=update_counts_in_status)
+
+    def _apply_file_pane_filter(self, *, update_counts_in_status: bool = True) -> None:
+        full = self._cached_file_rows
+        if manifest_filters.is_hide_filter_enabled():
+            visible = [r for r in full if not manifest_filters.should_hide_non_binary_path(r[0])]
+        else:
+            visible = list(full)
+        self._file_table_model.set_rows(visible)
+        if not update_counts_in_status or not full:
+            return
+        n_full = len(full)
+        n_vis = len(visible)
+        if manifest_filters.is_hide_filter_enabled() and n_vis != n_full:
+            self._file_pane_status.setText(f"{n_vis:,} file(s) shown · {n_full:,} total")
+        else:
+            self._file_pane_status.setText(f"{n_vis:,} file(s).")
 
     def _cancel_file_loader(self) -> None:
         if self._file_loader is not None:
@@ -206,7 +443,7 @@ class LibraryTab(QWidget):
                 "Files" if len(ids) == 1 else f"Files ({len(ids)} manifests)"
             )
             self._file_pane_status.setText("Loading…")
-            self._file_list_model.setStringList([])
+            self._set_file_pane_cache([], update_counts_in_status=False)
             self._start_file_loader(ids)
             return
 
@@ -219,13 +456,13 @@ class LibraryTab(QWidget):
                     "Files" if len(depot_ids) == 1 else f"Files ({len(depot_ids)} depots)"
                 )
                 self._file_pane_status.setText("No manifests for this depot yet.")
-                self._file_list_model.setStringList([])
+                self._set_file_pane_cache([], update_counts_in_status=False)
                 return
             self._file_pane_title.setText(
                 "Files (depot)" if len(depot_ids) == 1 else f"Files ({len(depot_ids)} depots)"
             )
             self._file_pane_status.setText("Loading…")
-            self._file_list_model.setStringList([])
+            self._set_file_pane_cache([], update_counts_in_status=False)
             self._start_file_loader(manifest_ids)
             return
 
@@ -238,28 +475,32 @@ class LibraryTab(QWidget):
                     "Files" if len(app_ids) == 1 else f"Files ({len(app_ids)} games)"
                 )
                 self._file_pane_status.setText("No manifests under this game yet.")
-                self._file_list_model.setStringList([])
+                self._set_file_pane_cache([], update_counts_in_status=False)
                 return
             self._file_pane_title.setText(
                 "Files (game)" if len(app_ids) == 1 else f"Files ({len(app_ids)} games)"
             )
             self._file_pane_status.setText("Loading…")
-            self._file_list_model.setStringList([])
+            self._set_file_pane_cache([], update_counts_in_status=False)
             self._start_file_loader(manifest_ids)
             return
 
         self._cancel_file_loader()
 
         if files_only and not manifests:
-            names = sorted({f.name for f in files_only})
+            rows: List[_FileTableRow] = []
+            for f in sorted(files_only, key=lambda x: x.name):
+                if is_directory_entry(f.flags):
+                    continue
+                sz = int(f.size) if f.size is not None else 0
+                rows.append((f.name, sz, str(f.manifest_id), (f.sha or "").strip()))
             self._file_pane_title.setText("Files (selection)")
-            self._file_pane_status.setText(f"{len(names)} path(s) in selection.")
-            self._file_list_model.setStringList(names)
+            self._set_file_pane_cache(rows, update_counts_in_status=True)
             return
 
         self._file_pane_title.setText("Files")
         self._file_pane_status.setText("Select a game, depot, or manifest in the tree.")
-        self._file_list_model.setStringList([])
+        self._set_file_pane_cache([], update_counts_in_status=False)
 
     def _start_file_loader(self, manifest_ids: List[str]) -> None:
         self._cancel_file_loader()
@@ -273,17 +514,17 @@ class LibraryTab(QWidget):
         loader = _ManifestFileListLoader(Path(self.db.db_path), manifest_ids, self)
         self._file_loader = loader
 
-        def on_loaded(names: list) -> None:
+        def on_loaded(rows: list) -> None:
             if gen != self._file_list_generation:
                 return
             self._file_loader = None
-            self._file_list_model.setStringList(names)
-            self._file_pane_status.setText(f"{len(names):,} file path(s).")
+            self._set_file_pane_cache(rows, update_counts_in_status=True)
 
         def on_failed(msg: str) -> None:
             if gen != self._file_list_generation:
                 return
             self._file_loader = None
+            self._set_file_pane_cache([], update_counts_in_status=False)
             self._file_pane_status.setText(f"Load failed: {msg}")
 
         loader.loaded.connect(on_loaded)

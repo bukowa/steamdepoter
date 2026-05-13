@@ -107,7 +107,13 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("SteamDepoter2")
     app.setOrganizationName("SteamDepoter")
-    
+
+    from src.settings import settings
+    from src import manifest_filters
+
+    settings.migrate_library_hide_patterns_from_qsettings()
+    manifest_filters.init_from_app_settings(settings)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

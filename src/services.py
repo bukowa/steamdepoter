@@ -1,10 +1,12 @@
 """Services layer for database operations."""
 from typing import List, Any
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from src.db import Game, Depot, Manifest, ManifestFile
 from src.db.validation import GameCreate, DepotCreate
+from src.steam_manifest_flags import DEPOT_FILE_FLAG_DIRECTORY, is_directory_entry
 from src.errors.errors import (
     DatabaseError, DuplicateError, NotFoundError, ForeignKeyError
 )
@@ -164,9 +166,15 @@ class ManifestService(BaseService):
         return self._get_all(Manifest)
 
     def get_files_by_manifest_id(self, manifest_id: str) -> List[ManifestFile]:
-        """Fetch files for a specific manifest."""
+        """Fetch files for a specific manifest (excludes depot directory placeholder rows)."""
         try:
-            return self.session.query(ManifestFile).filter(ManifestFile.manifest_id == manifest_id).all()
+            nondir = (func.coalesce(ManifestFile.flags, 0).op("&")(DEPOT_FILE_FLAG_DIRECTORY)) == 0
+            return (
+                self.session.query(ManifestFile)
+                .filter(ManifestFile.manifest_id == manifest_id, nondir)
+                .order_by(ManifestFile.name)
+                .all()
+            )
         except SQLAlchemyError as e:
             raise DatabaseError(f"Failed to fetch files for manifest {manifest_id}: {str(e)}")
 
@@ -207,6 +215,8 @@ class ManifestService(BaseService):
 
     def _add_file(self, manifest_id: str, f) -> None:
         """Add a single file row if it doesn't already exist."""
+        if is_directory_entry(getattr(f, "flags", None)):
+            return
         exists = self.session.query(ManifestFile).filter_by(
             manifest_id=manifest_id, name=f.name
         ).first()

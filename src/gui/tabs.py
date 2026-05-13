@@ -303,6 +303,7 @@ class BrowserTab(QWidget):
         self.web_view = QWebEngineView()
         self.web_page = QWebEnginePage(self.profile, self.web_view)
         self.web_view.setPage(self.web_page)
+        self.web_view.urlChanged.connect(self._on_url_changed)
         
         # Add components to splitter
         self.splitter.addWidget(self.sidebar)
@@ -313,6 +314,10 @@ class BrowserTab(QWidget):
         self.setLayout(layout)
 
     # ── Navigation ────────────────────────────────────────────────
+
+    def _on_url_changed(self, url: QUrl):
+        """Update the URL bar when the browser navigates."""
+        self.url_edit.setText(url.toString())
 
     def set_app_id(self, app_id: str):
         """Programmatically navigate to a specific App ID's depots page."""

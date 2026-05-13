@@ -1,14 +1,16 @@
 """Tab widgets for different views."""
 import random
+
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem, 
-    QMessageBox, QDialog, QMenu, QTabWidget, QLineEdit, QLabel, QTextEdit, 
-    QListWidget, QListWidgetItem, QSplitter, QAbstractItemView
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QMessageBox, QDialog, QLineEdit, QLabel,
+    QListWidget, QListWidgetItem, QSplitter,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from sqlalchemy.orm import Session
 
-from src.settings import Configurable
 from src.services import GameService, DepotService, ManifestService
 from src.db.database import Database
 from src.db import Game, Depot, Manifest
@@ -17,8 +19,6 @@ from src.gui.workers import CommandWorker
 from src.bins.depotdownloader import DepotDownloader
 from src.errors.exceptions_handler import show_error
 from src.steamdb_tasks import DepotsParsingTask, ManifestsParsingTask
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 
 class LibraryTab(QWidget):
     """Unified Library Tab displaying Games, Depots, Manifests, and Files."""
@@ -119,7 +119,7 @@ class LibraryTab(QWidget):
                 show_error(self, e, "Failed to Add Depot")
 
     def on_delete(self) -> None:
-        selected_data = self.tree_view._get_selected_items()
+        selected_data = self.tree_view.get_selected_items()
         if not selected_data:
             QMessageBox.warning(self, "Error", "Please select items to delete.")
             return
@@ -233,6 +233,7 @@ class BrowserTab(QWidget):
         self.init_ui()
 
     def init_ui(self):
+        import os
         layout = QVBoxLayout()
 
         # URL bar
@@ -282,7 +283,6 @@ class BrowserTab(QWidget):
         sidebar_layout.addStretch()
 
         # Web view
-        import os
         storage_path = os.path.abspath(os.path.join("data", "browser_storage"))
         os.makedirs(storage_path, exist_ok=True)
 
@@ -299,10 +299,12 @@ class BrowserTab(QWidget):
         # Add components to splitter
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.web_view)
-        self.splitter.setStretchFactor(1, 4) # Browser takes more space
+        self.splitter.setStretchFactor(1, 4)  # Browser takes more space
 
         layout.addWidget(self.splitter)
         self.setLayout(layout)
+
+    # ── Navigation ────────────────────────────────────────────────
 
     def set_app_id(self, app_id: str):
         """Programmatically navigate to a specific App ID's depots page."""
@@ -325,11 +327,11 @@ class BrowserTab(QWidget):
         self.web_view.load(QUrl(url))
 
     def load_steam(self):
-        url = "https://store.steampowered.com/login/"
-        self.url_edit.setText(url)
-        self.web_view.load(QUrl(url))
+        self.web_view.load(QUrl("https://store.steampowered.com/login/"))
 
-    def _log_task_progress(self, title: str, text: str, finished: bool = False):
+    # ── Task execution ────────────────────────────────────────────
+
+    def _log(self, title: str, text: str, finished: bool = False):
         if self.console:
             self.console.log_message(title, text, cancel_callback=self.cancel_tasks, finished=finished)
 
@@ -337,6 +339,37 @@ class BrowserTab(QWidget):
         self.cancel_requested = True
         if self.console:
             self.console.log_message("System", "Cancellation requested. Tasks will stop before processing the next item.")
+
+    def _resolve_target_id(self, task_cls, target_id=None):
+        """Determine target_id from the current URL if not provided."""
+        import re
+        if target_id:
+            return target_id
+
+        url = self.web_view.url().toString()
+        pattern = rf"/{task_cls.target_type}/(\d+)"
+        match = re.search(pattern, url)
+        return match.group(1) if match else None
+
+    def _show_retry_dialog(self, result, cancel_label="Cancel"):
+        """Show a retry dialog for Cloudflare/rate-limit errors. Returns True if user wants to continue."""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+
+        if result == "RATE_LIMITED":
+            msg_box.setWindowTitle("Rate Limited")
+            msg_box.setText("You have been temporarily rate limited by SteamDB.")
+            msg_box.setInformativeText("It is highly recommended to stop for at least an hour to avoid a permanent ban. Continue at your own risk.")
+        else:
+            msg_box.setWindowTitle("Action Required")
+            msg_box.setText("The page failed to load or parse correctly (likely Cloudflare or a block).")
+            msg_box.setInformativeText("Please check the browser tab, solve any challenges, and click 'Continue' to retry.")
+
+        continue_btn = msg_box.addButton("Continue", QMessageBox.ButtonRole.AcceptRole)
+        msg_box.addButton(cancel_label, QMessageBox.ButtonRole.RejectRole)
+
+        msg_box.exec()
+        return msg_box.clickedButton() == continue_btn
 
     def run_selected_task(self):
         item = self.task_list.currentItem()
@@ -348,49 +381,22 @@ class BrowserTab(QWidget):
         self.run_task(task_cls)
 
     def run_task(self, task_cls, target_id=None):
-        """Run a specific task class, determining target_id from the URL if not provided."""
-        if not target_id:
-            url = self.web_view.url().toString()
-            import re
-            
-            if task_cls.target_type == "app":
-                match = re.search(r"/app/(\d+)", url)
-                if match:
-                    target_id = match.group(1)
-            elif task_cls.target_type == "depot":
-                match = re.search(r"/depot/(\d+)", url)
-                if match:
-                    target_id = match.group(1)
-            
+        """Run a single task, determining target_id from the URL if not provided."""
+        target_id = self._resolve_target_id(task_cls, target_id)
         if not target_id:
             QMessageBox.warning(self, "Error", f"Could not determine {task_cls.target_type.upper()} ID from URL or arguments.")
             return
 
         task = task_cls(self.web_page, str(target_id))
+        log_title = f"{task_cls.name} Task"
 
-        def on_task_finished(result):
-            if result in ["RETRY_REQUIRED", "RATE_LIMITED", None]:
-                msg_box = QMessageBox(self)
-                msg_box.setIcon(QMessageBox.Icon.Warning)
-                
-                if result == "RATE_LIMITED":
-                    msg_box.setWindowTitle("Rate Limited")
-                    msg_box.setText("You have been temporarily rate limited by SteamDB.")
-                    msg_box.setInformativeText("It is highly recommended to stop for at least an hour to avoid a permanent ban. Continue at your own risk.")
-                else:
-                    msg_box.setWindowTitle("Action Required")
-                    msg_box.setText("The page failed to load or parse correctly (likely Cloudflare or a block).")
-                    msg_box.setInformativeText("Please check the browser tab, solve any challenges, and click 'Continue' to retry.")
-                
-                continue_btn = msg_box.addButton("Continue", QMessageBox.ButtonRole.AcceptRole)
-                cancel_btn = msg_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-                
-                msg_box.exec()
-                if msg_box.clickedButton() == continue_btn:
-                    self._log_task_progress(f"{task_cls.name} Task", f"Retrying {target_id}...")
+        def on_finished(result):
+            if result in ("RETRY_REQUIRED", "RATE_LIMITED", None):
+                if self._show_retry_dialog(result):
+                    self._log(log_title, f"Retrying {target_id}...")
                     self.run_task(task_cls, target_id)
                 else:
-                    self._log_task_progress(f"{task_cls.name} Task", "Task cancelled by user.", finished=True)
+                    self._log(log_title, "Task cancelled by user.", finished=True)
                 return
 
             try:
@@ -401,94 +407,71 @@ class BrowserTab(QWidget):
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to process task result: {str(e)}")
 
-        task.run(on_task_finished)
+        task.run(on_finished)
 
     def run_task_queue(self, task_cls, target_ids: list):
-        """Run a task on a list of targets sequentially with a delay to avoid rate limiting."""
+        """Run a task on a list of targets sequentially with delays to avoid rate limiting."""
         from PyQt6.QtCore import QTimer
 
         if not target_ids:
             return
 
+        log_title = f"{task_cls.name} Queue"
+
         def process_next():
             if self.cancel_requested:
-                self._log_task_progress(f"{task_cls.name} Queue", "Queue cancelled by user.", finished=True)
+                self._log(log_title, "Queue cancelled by user.", finished=True)
                 self.cancel_requested = False
                 self.task_queue_finished.emit()
                 return
 
             if not target_ids:
-                self._log_task_progress(f"{task_cls.name} Queue", "Queue finished processing all targets.", finished=True)
+                self._log(log_title, "Queue finished processing all targets.", finished=True)
                 self.task_queue_finished.emit()
                 QMessageBox.information(self, "Queue Finished", f"Finished processing all targets for {task_cls.name}")
                 return
 
             target_id = target_ids.pop(0)
-            self._log_task_progress(f"{task_cls.name} Queue", f"Started processing target ID: {target_id}...")
+            self._log(log_title, f"Started processing target ID: {target_id}...")
 
             task = task_cls(self.web_page, str(target_id))
 
-            def on_task_finished(result):
-                if result in ["RETRY_REQUIRED", "RATE_LIMITED", None]:
-                    msg_box = QMessageBox(self)
-                    msg_box.setIcon(QMessageBox.Icon.Warning)
-                    
-                    if result == "RATE_LIMITED":
-                        msg_box.setWindowTitle("Rate Limited")
-                        msg_box.setText("You have been temporarily rate limited by SteamDB.")
-                        msg_box.setInformativeText("It is highly recommended to stop for at least an hour. Continuing immediately will likely fail again.")
-                    else:
-                        msg_box.setWindowTitle("Action Required")
-                        msg_box.setText("The page failed to load or parse correctly (likely Cloudflare or a block).")
-                        msg_box.setInformativeText("Please check the browser tab, solve any challenges, and click 'Continue' to resume.")
-                    
-                    continue_btn = msg_box.addButton("Continue", QMessageBox.ButtonRole.AcceptRole)
-                    stop_btn = msg_box.addButton("Stop Queue", QMessageBox.ButtonRole.RejectRole)
-                    
-                    msg_box.exec()
-                    if msg_box.clickedButton() == continue_btn:
-                        self._log_task_progress(f"{task_cls.name} Queue", f"Retrying {target_id}...")
+            def on_finished(result):
+                if result in ("RETRY_REQUIRED", "RATE_LIMITED", None):
+                    if self._show_retry_dialog(result, cancel_label="Stop Queue"):
+                        self._log(log_title, f"Retrying {target_id}...")
                         target_ids.insert(0, target_id)
                         QTimer.singleShot(1000, process_next)
                     else:
-                        self._log_task_progress(f"{task_cls.name} Queue", "Queue cancelled by user.", finished=True)
+                        self._log(log_title, "Queue cancelled by user.", finished=True)
                     return
 
                 try:
-                    # result is guaranteed not to be None here due to the check above
                     msg = task.save_result(self.session, result)
-                    
-                    # Mark depot as parsed if it's ManifestsParsingTask
-                    from src.steamdb_tasks import ManifestsParsingTask
+
+                    # Mark depot as parsed if this is a manifests-parsing task
                     if task_cls == ManifestsParsingTask:
-                        from src.services import DepotService
-                        depot_service = DepotService(self.session)
-                        depot_service.mark_manifests_parsed(str(target_id))
-                            
+                        DepotService(self.session).mark_manifests_parsed(str(target_id))
+
                     self.data_changed.emit()
-                    self._log_task_progress(f"{task_cls.name} Queue", f"Success for {target_id}: {msg}")
+                    self._log(log_title, f"Success for {target_id}: {msg}")
                 except Exception as e:
-                    self._log_task_progress(f"{task_cls.name} Queue", f"Error for {target_id}: {e}")
+                    self._log(log_title, f"Error for {target_id}: {e}")
 
                 if target_ids:
                     delay = random.randint(7000, 15000)
-                    self._log_task_progress(f"{task_cls.name} Queue", f"Waiting {delay/1000:.1f} seconds before next target...")
+                    self._log(log_title, f"Waiting {delay/1000:.1f} seconds before next target...")
                     QTimer.singleShot(delay, process_next)
                 else:
                     process_next()
 
-            task.run(on_task_finished)
+            task.run(on_finished)
 
-        # Start the queue immediately (the first one is instant!)
-        self._log_task_progress(f"{task_cls.name} Queue", f"Initializing queue with {len(target_ids)} targets. First task will start immediately.")
+        # Start the queue immediately
+        self._log(log_title, f"Initializing queue with {len(target_ids)} targets. First task will start immediately.")
         process_next()
-
-    def _extract_app_id_from_url(self) -> str:
-        url = self.web_view.url().toString()
-        import re
-        match = re.search(r"/app/(\d+)", url)
-        return match.group(1) if match else None
 
     def refresh_data(self):
         pass
+
 

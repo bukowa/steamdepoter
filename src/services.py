@@ -190,25 +190,61 @@ class ManifestService(BaseService):
             self.session.rollback()
             raise DatabaseError(f"Failed to mark manifest {manifest_id} as parsed: {str(e)}")
 
+    # ── Helpers for file/manifest saving ──────────────────────────
+
+    def _add_file(self, manifest_id: str, f) -> None:
+        """Add a single file row if it doesn't already exist."""
+        exists = self.session.query(ManifestFile).filter_by(
+            manifest_id=manifest_id, name=f.name
+        ).first()
+        if not exists:
+            self.session.add(ManifestFile(
+                manifest_id=manifest_id,
+                name=f.name,
+                size=f.size,
+                chunks=f.chunks,
+                sha=f.sha,
+                flags=f.flags,
+            ))
+
+    def _ensure_depot(self, depot_id: str, app_id: str) -> Depot:
+        """Return existing depot or create a placeholder."""
+        depot = self.session.query(Depot).filter(Depot.depot_id == depot_id).first()
+        if not depot:
+            depot = Depot(depot_id=depot_id, app_id=app_id, name=f"Depot {depot_id}")
+            self.session.add(depot)
+            self.session.flush()
+        return depot
+
+    def _upsert_manifest(self, manifest_id: str, depot_id: str, m_data) -> Manifest:
+        """Create or update a manifest record, replacing its files."""
+        manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
+
+        if manifest:
+            # Clear existing files so we can re-add the fresh set
+            self.session.query(ManifestFile).filter(ManifestFile.manifest_id == manifest_id).delete()
+        else:
+            manifest = Manifest(manifest_id=manifest_id, depot_id=depot_id)
+            self.session.add(manifest)
+
+        manifest.date_str = m_data.date
+        manifest.total_files = m_data.total_files
+        manifest.total_chunks = m_data.total_chunks
+        manifest.total_bytes_on_disk = m_data.total_bytes_on_disk
+        manifest.total_bytes_compressed = m_data.total_bytes_compressed
+        return manifest
+
+    # ── Public methods ────────────────────────────────────────────
+
     def save_downloaded_manifest_files(self, manifest_id: str, parsed_files: List[Any]) -> None:
-        """Save downloaded files for a manifest."""
+        """Save files from DepotDownloader output for a single manifest."""
         try:
             manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
             if not manifest:
                 raise NotFoundError(f"Manifest {manifest_id} not found")
 
             for f in parsed_files:
-                # only add if not exists
-                existing_file = self.session.query(ManifestFile).filter_by(manifest_id=manifest_id, name=f.name).first()
-                if not existing_file:
-                    self.session.add(ManifestFile(
-                        manifest_id=manifest_id,
-                        name=f.name,
-                        size=f.size,
-                        chunks=f.chunks,
-                        sha=f.sha,
-                        flags=f.flags
-                    ))
+                self._add_file(manifest_id, f)
             self.session.commit()
         except Exception as e:
             self.session.rollback()
@@ -217,48 +253,18 @@ class ManifestService(BaseService):
     def save_manifests(self, app_id: str, manifests: dict) -> None:
         """
         Saves or updates manifests and their files for a given app.
-        manifests is a dict of {depot_id: ManifestDataClass}
+        manifests is a dict of {depot_id_int: ParsedManifest}
         """
         try:
             for depot_id_int, m_data in manifests.items():
                 depot_id = str(depot_id_int)
-                # Ensure depot exists
-                depot = self.session.query(Depot).filter(Depot.depot_id == depot_id).first()
-                if not depot:
-                    depot = Depot(depot_id=depot_id, app_id=app_id, name=f"Depot {depot_id}")
-                    self.session.add(depot)
-                    self.session.flush()
+                self._ensure_depot(depot_id, app_id)
 
-                # Check if manifest exists
                 manifest_id = str(m_data.manifest_id)
-                manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
-                
-                if manifest:
-                    # Clear existing files for this manifest to update them
-                    self.session.query(ManifestFile).filter(ManifestFile.manifest_id == manifest_id).delete()
-                else:
-                    manifest = Manifest(manifest_id=manifest_id, depot_id=depot_id)
-                    self.session.add(manifest)
+                self._upsert_manifest(manifest_id, depot_id, m_data)
 
-                # Update manifest info
-                manifest.date_str = m_data.date
-                manifest.total_files = getattr(m_data, 'total_files', 0)
-                manifest.total_chunks = getattr(m_data, 'total_chunks', 0)
-                manifest.total_bytes_on_disk = getattr(m_data, 'total_bytes_on_disk', 0)
-                manifest.total_bytes_compressed = getattr(m_data, 'total_bytes_compressed', 0)
-
-                # Add files
-                files = getattr(m_data, 'files', [])
-                for f_data in files:
-                    m_file = ManifestFile(
-                        manifest_id=manifest_id,
-                        name=f_data.name,
-                        size=f_data.size,
-                        chunks=f_data.chunks,
-                        sha=f_data.sha,
-                        flags=f_data.flags
-                    )
-                    self.session.add(m_file)
+                for f_data in m_data.files:
+                    self._add_file(manifest_id, f_data)
 
             self.session.commit()
         except Exception as e:

@@ -4,7 +4,7 @@ from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtCore import QUrl
 from sqlalchemy.orm import Session
 
-from src.services import DepotService
+from src.services import GameService, DepotService
 from src.db import Depot, Manifest
 
 
@@ -31,8 +31,8 @@ class SteamDBTask:
         raise NotImplementedError("Subclass must implement get_js_code()")
 
     def process_result(self, result: Any) -> Any:
-        """Process the result from JS execution."""
-        if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
+        """Process the result from JS execution. Returns sentinel strings for errors."""
+        if result in ("RETRY_REQUIRED", "RATE_LIMITED", None):
             return result
         return result
 
@@ -147,8 +147,8 @@ class DepotsParsingTask(SteamDBTask):
 
     def process_result(self, result: Any) -> Any:
         result = super().process_result(result)
-        if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
-            return result
+        if isinstance(result, str):
+            return result  # Sentinel (RETRY_REQUIRED, etc.)
         if not isinstance(result, dict):
             return {"name": None, "depots": []}
         return result
@@ -162,20 +162,16 @@ class DepotsParsingTask(SteamDBTask):
 
         # Update game name if found
         if app_name:
-            from src.services import GameService
-            game_service = GameService(session)
-            game_service.update_game(self.target_id, {'name': app_name})
+            GameService(session).update_game(self.target_id, {'name': app_name})
 
         if not depots:
             return f"Updated game name to '{app_name}' (no depots found)" if app_name else "No depots found or parsing failed"
 
+        # Upsert depots
         depot_service = DepotService(session)
-        count = 0
         for depot_data in depots:
             depot_id = depot_data['depot_id']
-            
-            depot = session.query(Depot).filter(Depot.depot_id == depot_id).first()
-            if depot:
+            if session.query(Depot).filter(Depot.depot_id == depot_id).first():
                 depot_service.update_depot(depot_id, {
                     'os': depot_data.get('os'),
                     'language': depot_data.get('language'),
@@ -186,11 +182,10 @@ class DepotsParsingTask(SteamDBTask):
                     'app_id': self.target_id,
                     'name': depot_data.get('name') or f"Depot {depot_id}",
                     'os': depot_data.get('os'),
-                    'language': depot_data.get('language')
+                    'language': depot_data.get('language'),
                 })
-            count += 1
-        
-        msg = f"Updated/Created {count} depots"
+
+        msg = f"Updated/Created {len(depots)} depots"
         if app_name:
             msg = f"Updated game name to '{app_name}' and " + msg.lower()
         return msg
@@ -234,8 +229,8 @@ class ManifestsParsingTask(SteamDBTask):
 
     def process_result(self, result: Any) -> Any:
         result = super().process_result(result)
-        if result in ["RETRY_REQUIRED", "RATE_LIMITED"]:
-            return result
+        if isinstance(result, str):
+            return result  # Sentinel
         if not isinstance(result, list):
             return []
         return result

@@ -11,15 +11,17 @@ from src.bins.runner import CommandRunner, BinOutput
 from src.settings import Configurable, settings
 
 @dataclass
-class ManifestFile:
+class ParsedFile:
+    """A single file entry parsed from a DepotDownloader manifest text file."""
+    name: str
     size: int
     chunks: int
     sha: str
     flags: int
-    name: str
 
 @dataclass
-class Manifest:
+class ParsedManifest:
+    """Manifest metadata + file list parsed from a DepotDownloader manifest text file."""
     depot_id: int
     manifest_id: int
     date: str
@@ -27,15 +29,13 @@ class Manifest:
     total_chunks: int
     total_bytes_on_disk: int
     total_bytes_compressed: int
-    files: List[ManifestFile]
+    files: List[ParsedFile]
 
 @dataclass
-class DepotManifestsOutput(BinOutput):
-    """
-    Specialized output for the get_depots command.
-    """
+class ManifestDataOutput(BinOutput):
+    """Output of a manifest-data fetch: paths + parsed manifest objects."""
     manifest_path: Path
-    manifests: Dict[int, Manifest] = field(default_factory=dict)
+    manifests: Dict[int, ParsedManifest] = field(default_factory=dict)
 
 class DepotDownloader(Configurable):
     """
@@ -72,7 +72,7 @@ class DepotDownloader(Configurable):
         
         self.runner = CommandRunner()
 
-    def _parse_manifest_file(self, file_path: Path) -> Optional[Manifest]:
+    def _parse_manifest_file(self, file_path: Path) -> Optional[ParsedManifest]:
         """
         Parses a single manifest .txt file.
         """
@@ -119,15 +119,15 @@ class DepotDownloader(Configurable):
                 # Example: 1099632 2 aee3f559f7d18c776aa358c58e7e4723da103b6f 0 avcodec-53.dll
                 file_match = re.match(r"(\d+)\s+(\d+)\s+([a-f0-9]{40})\s+(\d+)\s+(.+)", line)
                 if file_match:
-                    files.append(ManifestFile(
+                    files.append(ParsedFile(
+                        name=file_match.group(5),
                         size=int(file_match.group(1)),
                         chunks=int(file_match.group(2)),
                         sha=file_match.group(3),
                         flags=int(file_match.group(4)),
-                        name=file_match.group(5)
                     ))
 
-        return Manifest(
+        return ParsedManifest(
             depot_id=depot_id,
             manifest_id=manifest_id,
             date=date,
@@ -135,7 +135,7 @@ class DepotDownloader(Configurable):
             total_chunks=total_chunks,
             total_bytes_on_disk=total_bytes_on_disk,
             total_bytes_compressed=total_bytes_compressed,
-            files=files
+            files=files,
         )
 
     def get_manifest_data(
@@ -144,7 +144,7 @@ class DepotDownloader(Configurable):
         targets: List[tuple[int, int]], 
         on_output: Optional[Callable[[str], None]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None
-    ) -> DepotManifestsOutput:
+    ) -> ManifestDataOutput:
         logger.info(f"Fetching manifest data for App ID {app_id} with {len(targets)} targets...")
         app_data_path = self.manifests_data_path / str(app_id)
         app_data_path.mkdir(parents=True, exist_ok=True)
@@ -207,4 +207,4 @@ class DepotDownloader(Configurable):
             exit_code=0 if success else 1
         )
 
-        return DepotManifestsOutput.from_output(final_output, manifest_path=app_data_path, manifests=manifests)
+        return ManifestDataOutput.from_output(final_output, manifest_path=app_data_path, manifests=manifests)

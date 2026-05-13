@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
 
         # Connect navigation signal
         self.library_tab.open_steamdb.connect(self.on_open_steamdb)
+        self.library_tab.open_steamdb_depot.connect(self.on_open_steamdb_depot)
         self.library_tab.parse_depots_steamdb.connect(self.on_parse_depots_steamdb)
         self.library_tab.scrape_manifests_steamdb.connect(self.on_scrape_manifests_steamdb)
 
@@ -73,6 +74,11 @@ class MainWindow(QMainWindow):
         """Switch to browser tab and load app_id."""
         self.tabs.setCurrentWidget(self.browser_tab)
         self.browser_tab.set_app_id(app_id)
+
+    def on_open_steamdb_depot(self, depot_id: str):
+        """Switch to browser tab and load depot_id."""
+        self.tabs.setCurrentWidget(self.browser_tab)
+        self.browser_tab.set_depot_id(depot_id)
 
     def on_parse_depots_steamdb(self, app_id: str):
         """Switch to browser tab and automatically run DepotsParsingTask."""

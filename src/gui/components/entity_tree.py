@@ -13,6 +13,7 @@ class EntityTreeWidget(QTreeWidget):
 
     # Custom signals for actions
     open_steamdb_requested = pyqtSignal(str)          # app_id
+    open_steamdb_depot_requested = pyqtSignal(str)    # depot_id
     parse_depots_requested = pyqtSignal(str)          # app_id
     scrape_manifests_requested = pyqtSignal(list)     # [depot_ids]
     download_manifest_requested = pyqtSignal(list)    # [manifests]
@@ -67,7 +68,10 @@ class EntityTreeWidget(QTreeWidget):
         item.setText(0, f"📦 {depot.depot_id} - {depot.name}")
         item.setText(1, depot.os or "")
         item.setText(2, depot.language or "")
-        item.setText(3, "Yes" if depot.steamdb_manifests_parsed else "No")
+        
+        status = "Scraped" if depot.steamdb_manifests_parsed else "New"
+        item.setText(3, status)
+        
         item.setData(0, Qt.ItemDataRole.UserRole, depot)
         self._add_dummy(item)
         return item
@@ -76,7 +80,27 @@ class EntityTreeWidget(QTreeWidget):
         item = QTreeWidgetItem(parent)
         item.setText(0, f"📄 {manifest.manifest_id}")
         item.setText(1, str(manifest.date_str or ""))
-        item.setText(3, "Yes" if manifest.files_parsed else "No")
+        
+        # Determine status text
+        status_map = {
+            0: "Pending",
+            1: "Success",
+            2: "401 Unauthorized",
+            3: "Error"
+        }
+        
+        status_val = manifest.parsed_status if manifest.parsed_status is not None else 0
+        status_text = status_map.get(status_val, f"Unknown ({status_val})")
+        item.setText(3, status_text)
+        
+        # Color code the status
+        if status_val == 1:
+            item.setForeground(3, Qt.GlobalColor.green)
+        elif status_val == 2:
+            item.setForeground(3, Qt.GlobalColor.red)
+        elif status_val == 3:
+            item.setForeground(3, Qt.GlobalColor.darkRed)
+        
         item.setData(0, Qt.ItemDataRole.UserRole, manifest)
         self._add_dummy(item)
         return item
@@ -239,10 +263,17 @@ class EntityTreeWidget(QTreeWidget):
 
     def _build_depot_menu(self, menu: QMenu):
         """Build context menu actions for selected depots."""
-        depot_ids = [d.id for d in self.get_selected_items() if isinstance(d, Depot)]
-        if not depot_ids:
+        selected_depots = [d for d in self.get_selected_items() if isinstance(d, Depot)]
+        if not selected_depots:
             return
 
+        if len(selected_depots) == 1:
+            depot = selected_depots[0]
+            menu.addAction("Open in SteamDB").triggered.connect(
+                lambda: self.open_steamdb_depot_requested.emit(str(depot.depot_id)))
+            menu.addSeparator()
+
+        depot_ids = [d.id for d in selected_depots]
         db_depots = self.session.query(Depot).filter(Depot.id.in_(depot_ids)).all()
         self._add_scrape_actions(menu, db_depots)
 

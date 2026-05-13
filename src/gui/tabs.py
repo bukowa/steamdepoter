@@ -25,6 +25,7 @@ class LibraryTab(QWidget):
     
     data_changed = pyqtSignal()
     open_steamdb = pyqtSignal(str)
+    open_steamdb_depot = pyqtSignal(str)
     parse_depots_steamdb = pyqtSignal(str)
     scrape_manifests_steamdb = pyqtSignal(list)
 
@@ -56,6 +57,7 @@ class LibraryTab(QWidget):
         
         # Connect signals
         self.tree_view.open_steamdb_requested.connect(self.open_steamdb.emit)
+        self.tree_view.open_steamdb_depot_requested.connect(self.open_steamdb_depot.emit)
         self.tree_view.parse_depots_requested.connect(self.parse_depots_steamdb.emit)
         self.tree_view.scrape_manifests_requested.connect(self.scrape_manifests_steamdb.emit)
         self.tree_view.download_manifest_requested.connect(self.on_download_manifests)
@@ -316,6 +318,12 @@ class BrowserTab(QWidget):
         """Programmatically navigate to a specific App ID's depots page."""
         self.current_app_id = app_id
         url = f"https://steamdb.info/app/{app_id}/depots/"
+        self.url_edit.setText(url)
+        self.web_view.load(QUrl(url))
+
+    def set_depot_id(self, depot_id: str):
+        """Programmatically navigate to a specific Depot ID's page."""
+        url = f"https://steamdb.info/depot/{depot_id}/"
         self.url_edit.setText(url)
         self.web_view.load(QUrl(url))
 

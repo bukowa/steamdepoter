@@ -6,7 +6,7 @@ from typing import Optional, Callable, List, Dict, Any
 from dataclasses import dataclass, field
 
 from src.logger import logger
-from src.errors.errors import SubprocessError
+from src.errors.errors import SubprocessError, RateLimitError
 from src.bins.runner import CommandRunner, BinOutput
 from src.settings import Configurable, settings
 
@@ -14,6 +14,7 @@ MANIFEST_STATUS_PENDING = 0
 MANIFEST_STATUS_SUCCESS = 1
 MANIFEST_STATUS_ERR_401 = 2
 MANIFEST_STATUS_ERR_UNKNOWN = 3
+MANIFEST_STATUS_ERR_RATELIMIT = 4
 
 @dataclass
 class ParsedFile:
@@ -216,7 +217,12 @@ class DepotDownloader(Configurable):
 
             # Parse status from output
             status = MANIFEST_STATUS_ERR_UNKNOWN
-            if re.search(rf"Already have manifest {manifest_id}", output.stdout) or \
+            is_ratelimit = False
+            
+            if "RateLimitExceeded" in output.stdout:
+                status = MANIFEST_STATUS_ERR_RATELIMIT
+                is_ratelimit = True
+            elif re.search(rf"Already have manifest {manifest_id}", output.stdout) or \
                re.search(rf"Got manifest request code.*manifest {manifest_id}", output.stdout):
                 status = MANIFEST_STATUS_SUCCESS
             elif re.search(rf"Encountered 401.*{manifest_id}", output.stdout):
@@ -246,11 +252,19 @@ class DepotDownloader(Configurable):
             if on_manifest_complete:
                 on_manifest_complete(manifest_id, status, parsed_manifest)
 
+            if is_ratelimit:
+                logger.error("Rate limit exceeded. Stopping further requests.")
+                success = False
+                break
+
             if not output.success and status != MANIFEST_STATUS_SUCCESS:
                 logger.error(f"Command failed with code {output.exit_code} for depot {depot_id} manifest {manifest_id}")
                 success = False
 
         logger.info(f"Commands completed.")
+        
+        if any(s == MANIFEST_STATUS_ERR_RATELIMIT for s in statuses.values()):
+            raise RateLimitError("Steam rate limit exceeded. Please wait before trying again.")
         
         final_output = BinOutput(
             command=["depotdownloader", "(batch)"],

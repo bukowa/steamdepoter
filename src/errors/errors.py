@@ -37,3 +37,8 @@ class ForeignKeyError(DatabaseError):
 
 class SubprocessError(SteamDepoterError):
     """Subprocess operation failed."""
+
+
+class RateLimitError(SubprocessError):
+    """Steam rate limit exceeded."""
+    category = "rate_limit_error"

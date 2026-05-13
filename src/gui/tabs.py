@@ -1,24 +1,73 @@
 """Tab widgets for different views."""
 import random
+from pathlib import Path
+from typing import List, Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QMessageBox, QDialog, QLineEdit, QLabel,
     QListWidget, QListWidgetItem, QSplitter,
+    QListView, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QThread, QStringListModel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 from sqlalchemy.orm import Session
 
 from src.services import GameService, DepotService, ManifestService
 from src.db.database import Database
-from src.db import Game, Depot, Manifest
+from src.db import Game, Depot, Manifest, ManifestFile
 from src.gui.dialogs import GameDialog, DepotDialog
 from src.gui.workers import CommandWorker
 from src.bins.depotdownloader import DepotDownloader
 from src.errors.exceptions_handler import show_error
 from src.steamdb_tasks import DepotsParsingTask, ManifestsParsingTask
+
+
+class _ManifestFileListLoader(QThread):
+    """Background load of manifest file paths (own DB session; not UI-thread safe)."""
+
+    loaded = pyqtSignal(list)
+    failed = pyqtSignal(str)
+
+    def __init__(self, db_path: Path, manifest_ids: List[str], parent=None):
+        super().__init__(parent)
+        self._db_path = db_path
+        self._manifest_ids = manifest_ids
+
+    def run(self) -> None:
+        if not self._manifest_ids:
+            self.loaded.emit([])
+            return
+        try:
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+
+            engine = create_engine(
+                f"sqlite:///{self._db_path}",
+                echo=False,
+                connect_args={"check_same_thread": False},
+            )
+            Session = sessionmaker(bind=engine, expire_on_commit=False)
+            session = Session()
+            try:
+                q = (
+                    session.query(ManifestFile.name)
+                    .filter(ManifestFile.manifest_id.in_(self._manifest_ids))
+                    .order_by(ManifestFile.name)
+                )
+                names: List[str] = []
+                for (name,) in q.yield_per(4000):
+                    if self.isInterruptionRequested():
+                        return
+                    names.append(name)
+                self.loaded.emit(names)
+            finally:
+                session.close()
+                engine.dispose()
+        except Exception as e:
+            self.failed.emit(str(e))
+
 
 class LibraryTab(QWidget):
     """Unified Library Tab displaying Games, Depots, Manifests, and Files."""
@@ -34,6 +83,8 @@ class LibraryTab(QWidget):
         self.session = session
         self.console = console
         self.db = db
+        self._file_list_generation = 0
+        self._file_loader: Optional[_ManifestFileListLoader] = None
         self.init_ui()
 
     def init_ui(self) -> None:
@@ -53,8 +104,9 @@ class LibraryTab(QWidget):
         toolbar.addStretch()
 
         from src.gui.components import EntityTreeWidget
+
         self.tree_view = EntityTreeWidget(self.session)
-        
+
         # Connect signals
         self.tree_view.open_steamdb_requested.connect(self.open_steamdb.emit)
         self.tree_view.open_steamdb_depot_requested.connect(self.open_steamdb_depot.emit)
@@ -62,11 +114,44 @@ class LibraryTab(QWidget):
         self.tree_view.scrape_manifests_requested.connect(self.scrape_manifests_steamdb.emit)
         self.tree_view.download_manifest_requested.connect(self.on_download_manifests)
 
-        self.refresh_data()
+        self.tree_view.itemSelectionChanged.connect(self._on_tree_selection_changed)
 
-        layout.addLayout(toolbar)
-        layout.addWidget(self.tree_view)
+        # Left: toolbar + tree; right: manifest file list (virtualized via QListView)
+        left = QWidget()
+        left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(0, 0, 0, 0)
+        left_l.addLayout(toolbar)
+        left_l.addWidget(self.tree_view)
+
+        right = QWidget()
+        right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(0, 0, 0, 0)
+        self._file_pane_title = QLabel("Files")
+        self._file_pane_status = QLabel("Select a game, depot, or manifest in the tree.")
+        self._file_pane_status.setWordWrap(True)
+        self._file_list_view = QListView()
+        self._file_list_model = QStringListModel(self)
+        self._file_list_view.setModel(self._file_list_model)
+        self._file_list_view.setUniformItemSizes(True)
+        self._file_list_view.setAlternatingRowColors(True)
+        self._file_list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._file_list_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        right_l.addWidget(self._file_pane_title)
+        right_l.addWidget(self._file_pane_status)
+        right_l.addWidget(self._file_list_view, stretch=1)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(splitter)
         self.setLayout(layout)
+
+        self.refresh_data()
 
     @staticmethod
     def _make_button(label: str, callback) -> QPushButton:
@@ -76,6 +161,134 @@ class LibraryTab(QWidget):
 
     def refresh_data(self) -> None:
         self.tree_view.load_games()
+        self._cancel_file_loader()
+        self._file_list_model.setStringList([])
+        self._file_pane_status.setText("Select a game, depot, or manifest in the tree.")
+
+    def _cancel_file_loader(self) -> None:
+        if self._file_loader is not None:
+            self._file_loader.requestInterruption()
+            self._file_loader = None
+
+    def _manifest_ids_for_app_ids(self, app_ids: List[str]) -> List[str]:
+        """All manifest IDs for depots belonging to the given game app_id strings."""
+        if not app_ids:
+            return []
+        rows = (
+            self.session.query(Manifest.manifest_id)
+            .join(Depot, Manifest.depot_id == Depot.depot_id)
+            .filter(Depot.app_id.in_(app_ids))
+            .all()
+        )
+        return sorted({str(r[0]) for r in rows})
+
+    def _manifest_ids_for_depot_ids(self, depot_ids: List[str]) -> List[str]:
+        """All manifest IDs belonging to the given depot_id strings (main-thread session)."""
+        if not depot_ids:
+            return []
+        rows = (
+            self.session.query(Manifest.manifest_id)
+            .filter(Manifest.depot_id.in_(depot_ids))
+            .all()
+        )
+        return sorted({str(r[0]) for r in rows})
+
+    def _on_tree_selection_changed(self) -> None:
+        selected = self.tree_view.get_selected_items()
+        manifests = [x for x in selected if isinstance(x, Manifest)]
+        depots = [x for x in selected if isinstance(x, Depot)]
+        games = [x for x in selected if isinstance(x, Game)]
+        files_only = [x for x in selected if isinstance(x, ManifestFile)]
+
+        if manifests:
+            ids = sorted({str(m.manifest_id) for m in manifests})
+            self._file_pane_title.setText(
+                "Files" if len(ids) == 1 else f"Files ({len(ids)} manifests)"
+            )
+            self._file_pane_status.setText("Loading…")
+            self._file_list_model.setStringList([])
+            self._start_file_loader(ids)
+            return
+
+        if depots:
+            depot_ids = sorted({str(d.depot_id) for d in depots})
+            manifest_ids = self._manifest_ids_for_depot_ids(depot_ids)
+            self._cancel_file_loader()
+            if not manifest_ids:
+                self._file_pane_title.setText(
+                    "Files" if len(depot_ids) == 1 else f"Files ({len(depot_ids)} depots)"
+                )
+                self._file_pane_status.setText("No manifests for this depot yet.")
+                self._file_list_model.setStringList([])
+                return
+            self._file_pane_title.setText(
+                "Files (depot)" if len(depot_ids) == 1 else f"Files ({len(depot_ids)} depots)"
+            )
+            self._file_pane_status.setText("Loading…")
+            self._file_list_model.setStringList([])
+            self._start_file_loader(manifest_ids)
+            return
+
+        if games:
+            app_ids = sorted({str(g.app_id) for g in games})
+            manifest_ids = self._manifest_ids_for_app_ids(app_ids)
+            self._cancel_file_loader()
+            if not manifest_ids:
+                self._file_pane_title.setText(
+                    "Files" if len(app_ids) == 1 else f"Files ({len(app_ids)} games)"
+                )
+                self._file_pane_status.setText("No manifests under this game yet.")
+                self._file_list_model.setStringList([])
+                return
+            self._file_pane_title.setText(
+                "Files (game)" if len(app_ids) == 1 else f"Files ({len(app_ids)} games)"
+            )
+            self._file_pane_status.setText("Loading…")
+            self._file_list_model.setStringList([])
+            self._start_file_loader(manifest_ids)
+            return
+
+        self._cancel_file_loader()
+
+        if files_only and not manifests:
+            names = sorted({f.name for f in files_only})
+            self._file_pane_title.setText("Files (selection)")
+            self._file_pane_status.setText(f"{len(names)} path(s) in selection.")
+            self._file_list_model.setStringList(names)
+            return
+
+        self._file_pane_title.setText("Files")
+        self._file_pane_status.setText("Select a game, depot, or manifest in the tree.")
+        self._file_list_model.setStringList([])
+
+    def _start_file_loader(self, manifest_ids: List[str]) -> None:
+        self._cancel_file_loader()
+        if not self.db:
+            self._file_pane_status.setText("Database handle missing; cannot load file list.")
+            return
+
+        self._file_list_generation += 1
+        gen = self._file_list_generation
+
+        loader = _ManifestFileListLoader(Path(self.db.db_path), manifest_ids, self)
+        self._file_loader = loader
+
+        def on_loaded(names: list) -> None:
+            if gen != self._file_list_generation:
+                return
+            self._file_loader = None
+            self._file_list_model.setStringList(names)
+            self._file_pane_status.setText(f"{len(names):,} file path(s).")
+
+        def on_failed(msg: str) -> None:
+            if gen != self._file_list_generation:
+                return
+            self._file_loader = None
+            self._file_pane_status.setText(f"Load failed: {msg}")
+
+        loader.loaded.connect(on_loaded)
+        loader.failed.connect(on_failed)
+        loader.start()
 
     def _manual_refresh(self) -> None:
         self.session.expire_all()

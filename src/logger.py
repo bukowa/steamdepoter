@@ -22,7 +22,7 @@ def setup_logger(name: str = "steamdepoter", log_file: str = "steamdepoter.log",
 
     # File handler
     try:
-        log_path = Path("logs")
+        log_path = Path("data")
         log_path.mkdir(exist_ok=True)
         file_handler = logging.FileHandler(log_path / log_file)
         file_handler.setFormatter(formatter)

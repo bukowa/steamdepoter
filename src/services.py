@@ -190,6 +190,19 @@ class ManifestService(BaseService):
             self.session.rollback()
             raise DatabaseError(f"Failed to mark manifest {manifest_id} as parsed: {str(e)}")
 
+    def update_manifest_status(self, manifest_id: str, status: int) -> None:
+        """Update the parsed status of a manifest."""
+        try:
+            manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
+            if not manifest:
+                raise NotFoundError(f"Manifest {manifest_id} not found")
+
+            manifest.parsed_status = status
+            self.session.commit()
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to update manifest status {manifest_id}: {str(e)}")
+
     # ── Helpers for file/manifest saving ──────────────────────────
 
     def _add_file(self, manifest_id: str, f) -> None:
@@ -232,6 +245,7 @@ class ManifestService(BaseService):
         manifest.total_chunks = m_data.total_chunks
         manifest.total_bytes_on_disk = m_data.total_bytes_on_disk
         manifest.total_bytes_compressed = m_data.total_bytes_compressed
+        manifest.parsed_status = 1  # SUCCESS
         return manifest
 
     # ── Public methods ────────────────────────────────────────────
@@ -245,6 +259,7 @@ class ManifestService(BaseService):
 
             for f in parsed_files:
                 self._add_file(manifest_id, f)
+            manifest.parsed_status = 1  # SUCCESS
             self.session.commit()
         except Exception as e:
             self.session.rollback()

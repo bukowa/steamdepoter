@@ -10,6 +10,11 @@ from src.errors.errors import SubprocessError
 from src.bins.runner import CommandRunner, BinOutput
 from src.settings import Configurable, settings
 
+MANIFEST_STATUS_PENDING = 0
+MANIFEST_STATUS_SUCCESS = 1
+MANIFEST_STATUS_ERR_401 = 2
+MANIFEST_STATUS_ERR_UNKNOWN = 3
+
 @dataclass
 class ParsedFile:
     """A single file entry parsed from a DepotDownloader manifest text file."""
@@ -36,6 +41,7 @@ class ManifestDataOutput(BinOutput):
     """Output of a manifest-data fetch: paths + parsed manifest objects."""
     manifest_path: Path
     manifests: Dict[int, ParsedManifest] = field(default_factory=dict)
+    statuses: Dict[int, int] = field(default_factory=dict)
 
 class DepotDownloader(Configurable):
     """
@@ -151,12 +157,19 @@ class DepotDownloader(Configurable):
 
         combined_output = ""
         success = True
+        statuses = {}
+        forbidden_depots = set()
 
         for depot_id, manifest_id in targets:
             if is_cancelled and is_cancelled():
                 logger.info("Cancellation requested, stopping manifest fetch loop.")
                 self.runner.stop()
                 break
+
+            if depot_id in forbidden_depots:
+                logger.info(f"Skipping Depot ID {depot_id}, Manifest ID {manifest_id} as depot is marked unavailable.")
+                statuses[manifest_id] = MANIFEST_STATUS_ERR_401
+                continue
 
             logger.info(f"Fetching manifest data for App ID {app_id}, Depot ID {depot_id}, Manifest ID {manifest_id}...")
             
@@ -188,6 +201,28 @@ class DepotDownloader(Configurable):
             
             combined_output += output.stdout + "\n"
 
+            # Parse status from output
+            status = MANIFEST_STATUS_ERR_UNKNOWN
+            if re.search(rf"Already have manifest {manifest_id}", output.stdout) or \
+               re.search(rf"Got manifest request code.*manifest {manifest_id}", output.stdout):
+                status = MANIFEST_STATUS_SUCCESS
+            elif re.search(rf"Encountered 401.*{manifest_id}", output.stdout):
+                status = MANIFEST_STATUS_ERR_401
+            elif re.search(rf"Depot {depot_id} is not available from this account", output.stdout):
+                status = MANIFEST_STATUS_ERR_401
+                forbidden_depots.add(depot_id)
+            elif re.search(rf"Unable to download manifest {manifest_id}", output.stdout):
+                if "401" in output.stdout:
+                    status = MANIFEST_STATUS_ERR_401
+                else:
+                    status = MANIFEST_STATUS_ERR_UNKNOWN
+            elif output.success:
+                # If command succeeded but patterns didn't match, maybe it was already there or something else
+                # We'll assume success if the exit code was 0 and we have a manifest file later
+                status = MANIFEST_STATUS_SUCCESS
+            
+            statuses[manifest_id] = status
+
             if not output.success:
                 logger.error(f"Command failed with code {output.exit_code} for depot {depot_id} manifest {manifest_id}")
                 success = False
@@ -199,6 +234,8 @@ class DepotDownloader(Configurable):
             manifest = self._parse_manifest_file(manifest_file)
             if manifest:
                 manifests[manifest.manifest_id] = manifest
+                # If we parsed it, it's definitely a success
+                statuses[manifest.manifest_id] = MANIFEST_STATUS_SUCCESS
 
         final_output = BinOutput(
             command=["depotdownloader", "(batch)"],
@@ -207,4 +244,4 @@ class DepotDownloader(Configurable):
             exit_code=0 if success else 1
         )
 
-        return ManifestDataOutput.from_output(final_output, manifest_path=app_data_path, manifests=manifests)
+        return ManifestDataOutput.from_output(final_output, manifest_path=app_data_path, manifests=manifests, statuses=statuses)

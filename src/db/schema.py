@@ -60,6 +60,7 @@ class Manifest(Base):
     total_bytes_on_disk = Column(BigInteger)
     total_bytes_compressed = Column(BigInteger)
     files_parsed = Column(Boolean, default=False)
+    parsed_status = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

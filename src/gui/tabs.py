@@ -195,8 +195,14 @@ class LibraryTab(QWidget):
                         try:
                             service = ManifestService(new_session)
                             for man in man_list:
-                                if output.manifests and int(man.manifest_id) in output.manifests:
-                                    parsed_manifest = output.manifests[int(man.manifest_id)]
+                                manifest_id_int = int(man.manifest_id)
+                                
+                                # Update status from output
+                                if hasattr(output, 'statuses') and manifest_id_int in output.statuses:
+                                    service.update_manifest_status(str(man.manifest_id), output.statuses[manifest_id_int])
+
+                                if output.manifests and manifest_id_int in output.manifests:
+                                    parsed_manifest = output.manifests[manifest_id_int]
                                     service.save_downloaded_manifest_files(str(man.manifest_id), parsed_manifest.files)
                                     service.mark_files_parsed(str(man.manifest_id))
                             self.data_changed.emit()

@@ -103,7 +103,7 @@ class LibraryTab(QWidget):
         app_ids = [game.app_id for game in games]
 
         if not app_ids:
-            QMessageBox.warning(self, "Error", "No games exist. Please add a game first!")
+            show_error(self, Exception("No games exist. Please add a game first!"))
             return
 
         dialog = DepotDialog(self, app_ids=app_ids)
@@ -121,7 +121,7 @@ class LibraryTab(QWidget):
     def on_delete(self) -> None:
         selected_data = self.tree_view.get_selected_items()
         if not selected_data:
-            QMessageBox.warning(self, "Error", "Please select items to delete.")
+            show_error(self, Exception("Please select items to delete."))
             return
 
         games = [item for item in selected_data if isinstance(item, Game)]
@@ -176,7 +176,7 @@ class LibraryTab(QWidget):
         for m in manifests:
             depot = self.session.query(Depot).filter(Depot.depot_id == m.depot_id).first()
             if not depot:
-                QMessageBox.warning(self, "Error", f"Could not find depot for manifest {m.manifest_id}")
+                show_error(self, Exception(f"Could not find depot for manifest {m.manifest_id}"))
                 continue
             
             app_id = int(depot.app_id)
@@ -374,7 +374,7 @@ class BrowserTab(QWidget):
     def run_selected_task(self):
         item = self.task_list.currentItem()
         if not item:
-            QMessageBox.warning(self, "Error", "Please select a task from the sidebar.")
+            show_error(self, Exception("Please select a task from the sidebar."))
             return
 
         task_cls = item.data(Qt.ItemDataRole.UserRole)
@@ -384,7 +384,7 @@ class BrowserTab(QWidget):
         """Run a single task, determining target_id from the URL if not provided."""
         target_id = self._resolve_target_id(task_cls, target_id)
         if not target_id:
-            QMessageBox.warning(self, "Error", f"Could not determine {task_cls.target_type.upper()} ID from URL or arguments.")
+            show_error(self, Exception(f"Could not determine {task_cls.target_type.upper()} ID from URL or arguments."))
             return
 
         task = task_cls(self.web_page, str(target_id))

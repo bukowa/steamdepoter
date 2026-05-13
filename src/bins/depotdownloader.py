@@ -138,7 +138,13 @@ class DepotDownloader(Configurable):
             files=files
         )
 
-    def get_manifest_data(self, app_id: int, targets: List[tuple[int, int]], on_output: Optional[Callable[[str], None]] = None) -> DepotManifestsOutput:
+    def get_manifest_data(
+        self, 
+        app_id: int, 
+        targets: List[tuple[int, int]], 
+        on_output: Optional[Callable[[str], None]] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None
+    ) -> DepotManifestsOutput:
         logger.info(f"Fetching manifest data for App ID {app_id} with {len(targets)} targets...")
         app_data_path = self.manifests_data_path / str(app_id)
         app_data_path.mkdir(parents=True, exist_ok=True)
@@ -147,6 +153,11 @@ class DepotDownloader(Configurable):
         success = True
 
         for depot_id, manifest_id in targets:
+            if is_cancelled and is_cancelled():
+                logger.info("Cancellation requested, stopping manifest fetch loop.")
+                self.runner.stop()
+                break
+
             logger.info(f"Fetching manifest data for App ID {app_id}, Depot ID {depot_id}, Manifest ID {manifest_id}...")
             
             command = [str(self.binary_path)]
@@ -172,7 +183,8 @@ class DepotDownloader(Configurable):
             output = self.runner.run(
                 command,
                 sensitive_values=sensitive_values,
-                on_output=on_output
+                on_output=on_output,
+                is_cancelled=is_cancelled
             )
             
             combined_output += output.stdout + "\n"

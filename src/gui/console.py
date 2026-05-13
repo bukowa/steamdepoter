@@ -1,11 +1,12 @@
 """Console panel for displaying command outputs."""
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Callable
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, 
-    QPlainTextEdit, QLabel, QSplitter
+    QPlainTextEdit, QLabel, QSplitter, QMenu
 )
+from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
 
 from src.gui.workers import CommandWorker
@@ -13,13 +14,14 @@ from src.gui.workers import CommandWorker
 
 class ConsoleItem(QListWidgetItem):
     """Represents a command in the console list."""
-    def __init__(self, title: str, worker: CommandWorker = None):
+    def __init__(self, title: str, worker: CommandWorker = None, cancel_callback: Callable = None):
         timestamp = datetime.now().strftime("%H:%M:%S")
         super().__init__(f"[{timestamp}] {title}")
         self.title = title
         self.worker = worker
+        self.cancel_callback = cancel_callback
         self.output = ""
-        self.status = "running" # running, success, error
+        self.status = "running" # running, success, error, cancelled
         self._update_icon()
 
     def append_output(self, text: str):
@@ -36,6 +38,8 @@ class ConsoleItem(QListWidgetItem):
             self.setText(f"✅ {self.text().split(' ', 1)[-1]}")
         elif self.status == "error":
             self.setText(f"❌ {self.text().split(' ', 1)[-1]}")
+        elif self.status == "cancelled":
+            self.setText(f"🚫 {self.text().split(' ', 1)[-1]}")
 
 
 class ConsolePanel(QWidget):
@@ -57,6 +61,8 @@ class ConsolePanel(QWidget):
         self.list_widget = QListWidget()
         self.list_widget.setFixedWidth(250)
         self.list_widget.itemSelectionChanged.connect(self._on_selection_changed)
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
         
         # Right: Log viewer
         self.log_viewer = QPlainTextEdit()
@@ -105,7 +111,7 @@ class ConsolePanel(QWidget):
             self.log_viewer.setPlainText(selected.output)
             self.log_viewer.moveCursor(self.log_viewer.textCursor().MoveOperation.End)
 
-    def log_message(self, title: str, text: str):
+    def log_message(self, title: str, text: str, cancel_callback: Callable = None, finished: bool = False):
         """Log a generic message to a specific titled console item."""
         target_item = None
         for item in self.items:
@@ -114,15 +120,49 @@ class ConsolePanel(QWidget):
                 break
         
         if not target_item:
-            target_item = ConsoleItem(title, None)
+            target_item = ConsoleItem(title, None, cancel_callback)
             target_item.is_generic_log = True
-            target_item.set_status("success") # default state for log
+            target_item.set_status("running") # Generic logs start as running if they have a callback
+            if not cancel_callback:
+                target_item.set_status("success")
             self.items.append(target_item)
             self.list_widget.addItem(target_item)
         
+        if finished:
+            target_item.set_status("success")
+            target_item.cancel_callback = None
+        elif cancel_callback:
+            # Update callback if provided (e.g. if it was previously finished and now restarted)
+            target_item.cancel_callback = cancel_callback
+            target_item.set_status("running")
+
         # Don't steal focus unless it's the current item or first message
         if len(target_item.output) == 0:
             self.list_widget.setCurrentItem(target_item)
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         self._on_output(target_item, f"[{timestamp}] {text}\n")
+
+    def _show_context_menu(self, position):
+        item = self.list_widget.itemAt(position)
+        if not isinstance(item, ConsoleItem):
+            return
+
+        menu = QMenu()
+        cancel_action = QAction("Cancel Task", self)
+        # Enable if running and either has a worker or a direct cancel callback
+        cancel_action.setEnabled(item.status == "running" and (item.worker is not None or item.cancel_callback is not None))
+        cancel_action.triggered.connect(lambda: self._cancel_task(item))
+        menu.addAction(cancel_action)
+
+        menu.exec(self.list_widget.mapToGlobal(position))
+
+    def _cancel_task(self, item: ConsoleItem):
+        if item.status == "running":
+            if item.worker:
+                item.worker.stop()
+            if item.cancel_callback:
+                item.cancel_callback()
+                
+            item.set_status("cancelled")
+            self._on_output(item, "\n--- Task cancelled by user ---\n")

@@ -44,11 +44,26 @@ class CommandRunner:
     A generic runner for executing external binaries with real-time output streaming.
     """
 
+    def __init__(self):
+        self._proc: Optional[subprocess.Popen] = None
+        self._stopped = False
+
+    def stop(self):
+        """Signals the runner to stop the current process."""
+        self._stopped = True
+        if self._proc:
+            logger.info("Killing process...")
+            try:
+                self._proc.kill()
+            except Exception as e:
+                logger.warning(f"Failed to kill process: {e}")
+
     def run(
         self,
         command: List[str],
         sensitive_values: Optional[List[str]] = None,
-        on_output: Optional[Callable[[str], None]] = None
+        on_output: Optional[Callable[[str], None]] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None
     ) -> BinOutput:
         """
         Executes a command and captures its output.
@@ -57,6 +72,7 @@ class CommandRunner:
             command: The command and its arguments as a list of strings.
             sensitive_values: A list of values that should be masked with '***' in logs and BinOutput.
             on_output: An optional callback that receives each character of the output in real-time.
+            is_cancelled: An optional callback that returns True if the command should be cancelled.
 
         Returns:
             A BinOutput object containing the execution results.
@@ -64,6 +80,9 @@ class CommandRunner:
         Raises:
             SubprocessError: If the command fails to start.
         """
+        self._stopped = False
+        self._proc = None
+
         # Create a safe command for logging and BinOutput
         safe_command = command.copy()
         if sensitive_values:
@@ -87,8 +106,15 @@ class CommandRunner:
                 bufsize=0, # Unbuffered
                 universal_newlines=True
             ) as proc:
+                self._proc = proc
                 if proc.stdout:
                     while True:
+                        if self._stopped or (is_cancelled and is_cancelled()):
+                            logger.info("Runner stopped or cancellation requested, killing process.")
+                            self._stopped = True # Ensure it's marked as stopped if it came from callback
+                            proc.kill()
+                            break
+
                         char = proc.stdout.read(1)
                         if not char:
                             break
@@ -101,7 +127,10 @@ class CommandRunner:
                 exit_code = proc.returncode
                 stdout = "".join(full_output)
 
-                logger.info(f"Command completed with exit code {exit_code}")
+                if self._stopped:
+                    logger.info("Command was cancelled by user.")
+                else:
+                    logger.info(f"Command completed with exit code {exit_code}")
                 
                 return BinOutput(
                     command=safe_command,
@@ -110,5 +139,15 @@ class CommandRunner:
                     exit_code=exit_code
                 )
         except Exception as e:
+            if self._stopped:
+                logger.info("Process termination during stop.")
+                return BinOutput(
+                    command=safe_command,
+                    stdout="".join(full_output),
+                    stderr=str(e),
+                    exit_code=-1
+                )
             logger.error(f"Failed to execute command: {e}")
             raise SubprocessError(f"Failed to execute command: {e}") from e
+        finally:
+            self._proc = None

@@ -207,9 +207,10 @@ class LibraryTab(QWidget):
                 return on_finished
 
             worker = CommandWorker(downloader.get_manifest_data, app_id=app_id, targets=targets)
+            worker.on_cancel = downloader.runner.stop
             worker.finished.connect(make_on_finished(app_manifests))
             
-            self.console.add_command(worker, f"Download {len(targets)} Manifest(s) for App {app_id}")
+            self.console.add_command(worker, f"Fetch File List for {len(targets)} Manifest(s) (App {app_id})")
 
 
 class BrowserTab(QWidget):
@@ -383,11 +384,11 @@ class BrowserTab(QWidget):
                 msg_box.exec()
                 if msg_box.clickedButton() == continue_btn:
                     if self.console:
-                        self.console.log_message(f"{task_cls.name} Task", f"Retrying {target_id}...")
+                        self.console.log_message(f"{task_cls.name} Task", f"Retrying {target_id}...", cancel_callback=self.cancel_tasks)
                     self.run_task(task_cls, target_id)
                 else:
                     if self.console:
-                        self.console.log_message(f"{task_cls.name} Task", "Task cancelled by user.")
+                        self.console.log_message(f"{task_cls.name} Task", "Task cancelled by user.", cancel_callback=self.cancel_tasks)
                 return
 
             try:
@@ -410,21 +411,21 @@ class BrowserTab(QWidget):
         def process_next():
             if self.cancel_requested:
                 if self.console:
-                    self.console.log_message(f"{task_cls.name} Queue", "Queue cancelled by user.")
+                    self.console.log_message(f"{task_cls.name} Queue", "Queue cancelled by user.", finished=True)
                 self.cancel_requested = False
                 self.task_queue_finished.emit()
                 return
 
             if not target_ids:
                 if self.console:
-                    self.console.log_message(f"{task_cls.name} Queue", f"Queue finished processing all targets.")
+                    self.console.log_message(f"{task_cls.name} Queue", f"Queue finished processing all targets.", finished=True)
                 self.task_queue_finished.emit()
                 QMessageBox.information(self, "Queue Finished", f"Finished processing all targets for {task_cls.name}")
                 return
 
             target_id = target_ids.pop(0)
             if self.console:
-                self.console.log_message(f"{task_cls.name} Queue", f"Started processing target ID: {target_id}...")
+                self.console.log_message(f"{task_cls.name} Queue", f"Started processing target ID: {target_id}...", cancel_callback=self.cancel_tasks)
 
             task = task_cls(self.web_page, str(target_id))
 
@@ -448,12 +449,12 @@ class BrowserTab(QWidget):
                     msg_box.exec()
                     if msg_box.clickedButton() == continue_btn:
                         if self.console:
-                            self.console.log_message(f"{task_cls.name} Queue", f"Retrying {target_id}...")
+                            self.console.log_message(f"{task_cls.name} Queue", f"Retrying {target_id}...", cancel_callback=self.cancel_tasks)
                         target_ids.insert(0, target_id)
                         QTimer.singleShot(1000, process_next)
                     else:
                         if self.console:
-                            self.console.log_message(f"{task_cls.name} Queue", "Queue cancelled by user.")
+                            self.console.log_message(f"{task_cls.name} Queue", "Queue cancelled by user.", cancel_callback=self.cancel_tasks)
                     return
 
                 try:
@@ -469,15 +470,15 @@ class BrowserTab(QWidget):
                             
                     self.data_changed.emit()
                     if self.console:
-                        self.console.log_message(f"{task_cls.name} Queue", f"Success for {target_id}: {msg}")
+                        self.console.log_message(f"{task_cls.name} Queue", f"Success for {target_id}: {msg}", cancel_callback=self.cancel_tasks)
                 except Exception as e:
                     if self.console:
-                        self.console.log_message(f"{task_cls.name} Queue", f"Error for {target_id}: {e}")
+                        self.console.log_message(f"{task_cls.name} Queue", f"Error for {target_id}: {e}", cancel_callback=self.cancel_tasks)
 
                 if target_ids:
                     delay = random.randint(7000, 15000)
                     if self.console:
-                        self.console.log_message(f"{task_cls.name} Queue", f"Waiting {delay/1000:.1f} seconds before next target...")
+                        self.console.log_message(f"{task_cls.name} Queue", f"Waiting {delay/1000:.1f} seconds before next target...", cancel_callback=self.cancel_tasks)
                     QTimer.singleShot(delay, process_next)
                 else:
                     process_next()
@@ -486,7 +487,7 @@ class BrowserTab(QWidget):
 
         # Start the queue immediately (the first one is instant!)
         if self.console:
-            self.console.log_message(f"{task_cls.name} Queue", f"Initializing queue with {len(target_ids)} targets. First task will start immediately.")
+            self.console.log_message(f"{task_cls.name} Queue", f"Initializing queue with {len(target_ids)} targets. First task will start immediately.", cancel_callback=self.cancel_tasks)
         process_next()
 
     def _extract_app_id_from_url(self) -> str:

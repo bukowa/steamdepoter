@@ -237,11 +237,11 @@ class EntityTreeWidget(QTreeWidget):
                     
                     unparsed_manifests = [m for m in all_manifests if not m.files_parsed]
                     if unparsed_manifests:
-                        dl_all_action = menu.addAction(f"Download Files ({len(unparsed_manifests)} Unparsed Manifests)")
+                        dl_all_action = menu.addAction(f"Fetch File List ({len(unparsed_manifests)} Unparsed Manifests)")
                         dl_all_action.triggered.connect(lambda checked, m=unparsed_manifests: self.download_manifest_requested.emit(m))
 
                     if all_manifests:
-                        force_dl_all_action = menu.addAction(f"Force Download Files (All {len(all_manifests)} Manifests)")
+                        force_dl_all_action = menu.addAction(f"Force Fetch File List (All {len(all_manifests)} Manifests)")
                         force_dl_all_action.triggered.connect(lambda checked, m=all_manifests: self.download_manifest_requested.emit(m))
                 
         elif isinstance(data, Depot):
@@ -264,11 +264,11 @@ class EntityTreeWidget(QTreeWidget):
 
                 unparsed_manifests = [m for m in all_manifests if not m.files_parsed]
                 if unparsed_manifests:
-                    dl_action = menu.addAction(f"Download Files ({len(unparsed_manifests)} Unparsed Manifests)")
+                    dl_action = menu.addAction(f"Fetch File List ({len(unparsed_manifests)} Unparsed Manifests)")
                     dl_action.triggered.connect(lambda checked, m=unparsed_manifests: self.download_manifest_requested.emit(m))
                 
                 if all_manifests:
-                    force_dl_action = menu.addAction(f"Force Download Files (All {len(all_manifests)} Manifests)")
+                    force_dl_action = menu.addAction(f"Force Fetch File List (All {len(all_manifests)} Manifests)")
                     force_dl_action.triggered.connect(lambda checked, m=all_manifests: self.download_manifest_requested.emit(m))
                 
         elif isinstance(data, Manifest):
@@ -277,10 +277,10 @@ class EntityTreeWidget(QTreeWidget):
                 db_manifests = self.session.query(Manifest).filter(Manifest.id.in_([m.id for m in manifests])).all()
                 unparsed_manifests = [m for m in db_manifests if not m.files_parsed]
                 if unparsed_manifests:
-                    parse_action = menu.addAction(f"Download Files ({len(unparsed_manifests)} Unparsed Manifests)")
+                    parse_action = menu.addAction(f"Fetch File List ({len(unparsed_manifests)} Unparsed Manifests)")
                     parse_action.triggered.connect(lambda checked, m=unparsed_manifests: self.download_manifest_requested.emit(m))
                 
-                force_parse_action = menu.addAction(f"Force Download Files (All {len(db_manifests)} Selected)")
+                force_parse_action = menu.addAction(f"Force Fetch File List (All {len(db_manifests)} Selected)")
                 force_parse_action.triggered.connect(lambda checked, m=db_manifests: self.download_manifest_requested.emit(m))
                 
         if not menu.isEmpty():

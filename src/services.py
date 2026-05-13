@@ -250,16 +250,27 @@ class ManifestService(BaseService):
 
     # ── Public methods ────────────────────────────────────────────
 
-    def save_downloaded_manifest_files(self, manifest_id: str, parsed_files: List[Any]) -> None:
-        """Save files from DepotDownloader output for a single manifest."""
+    def save_downloaded_manifest_files(self, manifest_id: str, parsed_manifest: Any) -> None:
+        """Save files and metadata from DepotDownloader output for a single manifest."""
         try:
             manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id).first()
             if not manifest:
                 raise NotFoundError(f"Manifest {manifest_id} not found")
 
-            for f in parsed_files:
-                self._add_file(manifest_id, f)
+            # Update metadata
+            manifest.date_str = parsed_manifest.date
+            manifest.total_files = parsed_manifest.total_files
+            manifest.total_chunks = parsed_manifest.total_chunks
+            manifest.total_bytes_on_disk = parsed_manifest.total_bytes_on_disk
+            manifest.total_bytes_compressed = parsed_manifest.total_bytes_compressed
             manifest.parsed_status = 1  # SUCCESS
+            manifest.files_parsed = True
+
+            # Clear and re-add files
+            self.session.query(ManifestFile).filter(ManifestFile.manifest_id == manifest_id).delete()
+            for f in parsed_manifest.files:
+                self._add_file(manifest_id, f)
+            
             self.session.commit()
         except Exception as e:
             self.session.rollback()

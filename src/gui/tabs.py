@@ -190,33 +190,34 @@ class LibraryTab(QWidget):
         for app_id, app_manifests in targets_by_app.items():
             targets = [(int(m.depot_id), int(m.manifest_id)) for m in app_manifests]
             
-            def make_on_finished(man_list):
-                def on_finished(output):
-                    if self.db:
-                        new_session = self.db.get_session()
-                        try:
-                            service = ManifestService(new_session)
-                            for man in man_list:
-                                manifest_id_int = int(man.manifest_id)
-                                
-                                # Update status from output
-                                if hasattr(output, 'statuses') and manifest_id_int in output.statuses:
-                                    service.update_manifest_status(str(man.manifest_id), output.statuses[manifest_id_int])
+            def handle_incremental_update(manifest_id, status, parsed_manifest):
+                if self.db:
+                    new_session = self.db.get_session()
+                    try:
+                        service = ManifestService(new_session)
+                        manifest_id_str = str(manifest_id)
+                        
+                        if parsed_manifest:
+                            # This now handles status, metadata, and files
+                            service.save_downloaded_manifest_files(manifest_id_str, parsed_manifest)
+                        else:
+                            service.update_manifest_status(manifest_id_str, status)
+                        
+                        self.data_changed.emit()
+                    except Exception as e:
+                        print(f"Failed to process incremental manifest {manifest_id}: {e}")
+                    finally:
+                        new_session.close()
 
-                                if output.manifests and manifest_id_int in output.manifests:
-                                    parsed_manifest = output.manifests[manifest_id_int]
-                                    service.save_downloaded_manifest_files(str(man.manifest_id), parsed_manifest.files)
-                                    service.mark_files_parsed(str(man.manifest_id))
-                            self.data_changed.emit()
-                        except Exception as e:
-                            print(f"Failed to process manifest files: {e}")
-                        finally:
-                            new_session.close()
-                return on_finished
-
-            worker = CommandWorker(downloader.get_manifest_data, app_id=app_id, targets=targets)
+            worker = CommandWorker(
+                downloader.get_manifest_data, 
+                app_id=app_id, 
+                targets=targets,
+                on_manifest_complete=handle_incremental_update
+            )
             worker.on_cancel = downloader.runner.stop
-            worker.finished.connect(make_on_finished(app_manifests))
+            # Final on_finished can be simpler now, or just emit one last refresh
+            worker.finished.connect(lambda _: self.data_changed.emit())
             
             self.console.add_command(worker, f"Fetch File List for {len(targets)} Manifest(s) (App {app_id})")
 

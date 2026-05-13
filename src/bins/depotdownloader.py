@@ -144,20 +144,30 @@ class DepotDownloader(Configurable):
             files=files,
         )
 
+    def get_app_data_path(self, app_id: int) -> Path:
+        """Returns the base data path for a specific app."""
+        return self.manifests_data_path / str(app_id)
+
+    def get_manifest_file_path(self, app_id: int, depot_id: int, manifest_id: int) -> Path:
+        """Returns the expected path for a manifest .txt file."""
+        return self.get_app_data_path(app_id) / f"manifest_{depot_id}_{manifest_id}.txt"
+
     def get_manifest_data(
         self, 
         app_id: int, 
         targets: List[tuple[int, int]], 
         on_output: Optional[Callable[[str], None]] = None,
-        is_cancelled: Optional[Callable[[], bool]] = None
+        is_cancelled: Optional[Callable[[], bool]] = None,
+        on_manifest_complete: Optional[Callable[[int, int, Optional[ParsedManifest]], None]] = None
     ) -> ManifestDataOutput:
         logger.info(f"Fetching manifest data for App ID {app_id} with {len(targets)} targets...")
-        app_data_path = self.manifests_data_path / str(app_id)
+        app_data_path = self.get_app_data_path(app_id)
         app_data_path.mkdir(parents=True, exist_ok=True)
 
         combined_output = ""
         success = True
         statuses = {}
+        manifests = {}
         forbidden_depots = set()
 
         for depot_id, manifest_id in targets:
@@ -168,7 +178,10 @@ class DepotDownloader(Configurable):
 
             if depot_id in forbidden_depots:
                 logger.info(f"Skipping Depot ID {depot_id}, Manifest ID {manifest_id} as depot is marked unavailable.")
-                statuses[manifest_id] = MANIFEST_STATUS_ERR_401
+                status = MANIFEST_STATUS_ERR_401
+                statuses[manifest_id] = status
+                if on_manifest_complete:
+                    on_manifest_complete(manifest_id, status, None)
                 continue
 
             logger.info(f"Fetching manifest data for App ID {app_id}, Depot ID {depot_id}, Manifest ID {manifest_id}...")
@@ -217,26 +230,28 @@ class DepotDownloader(Configurable):
                 else:
                     status = MANIFEST_STATUS_ERR_UNKNOWN
             elif output.success:
-                # If command succeeded but patterns didn't match, maybe it was already there or something else
-                # We'll assume success if the exit code was 0 and we have a manifest file later
                 status = MANIFEST_STATUS_SUCCESS
             
-            statuses[manifest_id] = status
+            # Incremental parsing
+            parsed_manifest = None
+            manifest_file = self.get_manifest_file_path(app_id, depot_id, manifest_id)
+            if manifest_file.exists():
+                parsed_manifest = self._parse_manifest_file(manifest_file)
+                if parsed_manifest:
+                    status = MANIFEST_STATUS_SUCCESS
+                    manifests[manifest_id] = parsed_manifest
 
-            if not output.success:
+            statuses[manifest_id] = status
+            
+            if on_manifest_complete:
+                on_manifest_complete(manifest_id, status, parsed_manifest)
+
+            if not output.success and status != MANIFEST_STATUS_SUCCESS:
                 logger.error(f"Command failed with code {output.exit_code} for depot {depot_id} manifest {manifest_id}")
                 success = False
 
-        logger.info(f"Commands completed, parsing manifests...")
+        logger.info(f"Commands completed.")
         
-        manifests = {}
-        for manifest_file in app_data_path.glob(f"manifest_*.txt"):
-            manifest = self._parse_manifest_file(manifest_file)
-            if manifest:
-                manifests[manifest.manifest_id] = manifest
-                # If we parsed it, it's definitely a success
-                statuses[manifest.manifest_id] = MANIFEST_STATUS_SUCCESS
-
         final_output = BinOutput(
             command=["depotdownloader", "(batch)"],
             stdout=combined_output,

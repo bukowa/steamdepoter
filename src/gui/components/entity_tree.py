@@ -160,14 +160,18 @@ class EntityTreeWidget(QTreeWidget):
     @staticmethod
     def _get_item_id(data) -> Optional[str]:
         """Return a stable string ID for a tree node's data, or None."""
-        if isinstance(data, Game):
-            return f"game_{data.app_id}"
-        if isinstance(data, Depot):
-            return f"depot_{data.depot_id}"
-        if isinstance(data, Manifest):
-            return f"manifest_{data.manifest_id}"
-        if isinstance(data, ManifestFile):
-            return f"file_{data.id}"
+        try:
+            if isinstance(data, Game):
+                return f"game_{data.app_id}"
+            if isinstance(data, Depot):
+                return f"depot_{data.depot_id}"
+            if isinstance(data, Manifest):
+                return f"manifest_{data.manifest_id}"
+            if isinstance(data, ManifestFile):
+                return f"file_{data.id}"
+        except Exception:
+            # Handle expired/deleted SQLAlchemy objects
+            return None
         return None
 
     def _get_tree_state(self) -> dict:

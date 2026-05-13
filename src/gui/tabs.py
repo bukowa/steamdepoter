@@ -129,6 +129,12 @@ class LibraryTab(QWidget):
         games = [item for item in selected_data if isinstance(item, Game)]
         depots = [item for item in selected_data if isinstance(item, Depot)]
         manifests = [item for item in selected_data if isinstance(item, Manifest)]
+
+        # Capture IDs and relationships BEFORE any deletion (which commits and expires objects)
+        game_ids = [g.id for g in games]
+        game_app_ids = {g.app_id for g in games}
+        depot_ids = [d.id for d in depots if d.app_id not in game_app_ids]
+        manifest_ids = [m.id for m in manifests]
         
         msg_parts = []
         if games: msg_parts.append(f"{len(games)} game(s)")
@@ -151,15 +157,11 @@ class LibraryTab(QWidget):
 
         if response == QMessageBox.StandardButton.Yes:
             try:
-                if games:
-                    GameService(self.session).delete_games([g.id for g in games])
-                if depots:
-                    # Filter out depots whose games are already being deleted to avoid errors
-                    depot_ids = [d.id for d in depots if not any(g.app_id == d.app_id for g in games)]
-                    if depot_ids:
-                        DepotService(self.session).delete_depots(depot_ids)
-                if manifests:
-                    manifest_ids = [m.id for m in manifests]
+                if game_ids:
+                    GameService(self.session).delete_games(game_ids)
+                if depot_ids:
+                    DepotService(self.session).delete_depots(depot_ids)
+                if manifest_ids:
                     ManifestService(self.session).delete_manifests(manifest_ids)
                 
                 self.data_changed.emit()

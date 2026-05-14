@@ -1,7 +1,7 @@
 .PHONY: setup clean check help
 
-DEPOT_DL_URL := https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-windows-x64.zip
-DEPOT_DL_SHA := 41c9e9f0df54b3ad02e67a11726756e5c73283bd7c2e1b04acfa5ae4c2ed3767
+DEPOT_DL_URL := https://github.com/bukforks/DepotDownloader/releases/download/DepotDownloader_3.5.0/DepotDownloader-windows-x64.zip
+DEPOT_DL_SHA := 88ca428d989b4a8c64998bb08990c86a2beec329deb4ec1bc3269b63b5e84bc1
 
 BIN_DIR   := .bin
 DEPOT_ZIP := $(BIN_DIR)/DepotDownloader.zip

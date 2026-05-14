@@ -666,7 +666,7 @@ class LibraryTab(QWidget):
                         new_session.close()
 
             worker = CommandWorker(
-                downloader.get_manifest_data, 
+                downloader.get_manifest_data_batch, 
                 app_id=app_id, 
                 targets=targets,
                 on_manifest_complete=handle_incremental_update

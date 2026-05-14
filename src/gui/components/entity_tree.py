@@ -220,6 +220,38 @@ class EntityTreeWidget(QTreeWidget):
             if item.data(0, Qt.ItemDataRole.UserRole) is not None
         ]
 
+    def select_manifest(self, manifest_id_str: str) -> bool:
+        """Expand necessary parents and select the manifest node."""
+        manifest = self.session.query(Manifest).filter(Manifest.manifest_id == manifest_id_str).first()
+        if not manifest or not manifest.depot:
+            return False
+
+        app_id = manifest.depot.app_id
+        depot_id = manifest.depot.depot_id
+
+        for i in range(self.topLevelItemCount()):
+            game_item = self.topLevelItem(i)
+            game_data = game_item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(game_data, Game) and game_data.app_id == app_id:
+                game_item.setExpanded(True)
+                
+                for j in range(game_item.childCount()):
+                    depot_item = game_item.child(j)
+                    depot_data = depot_item.data(0, Qt.ItemDataRole.UserRole)
+                    if isinstance(depot_data, Depot) and depot_data.depot_id == depot_id:
+                        depot_item.setExpanded(True)
+                        
+                        for k in range(depot_item.childCount()):
+                            man_item = depot_item.child(k)
+                            man_data = man_item.data(0, Qt.ItemDataRole.UserRole)
+                            if isinstance(man_data, Manifest) and str(man_data.manifest_id) == manifest_id_str:
+                                self.clearSelection()
+                                man_item.setSelected(True)
+                                self.scrollToItem(man_item)
+                                return True
+                break
+        return False
+
     # ── Context menu ──────────────────────────────────────────────
 
     def _on_context_menu(self, point):

@@ -83,6 +83,8 @@ class ManifestFile(Base):
     chunks = Column(Integer)
     sha = Column(String(40))
     flags = Column(Integer)
+    local_path = Column(String, nullable=True)
+    download_status = Column(Integer, default=0)
 
     manifest = relationship("Manifest", back_populates="files")
 

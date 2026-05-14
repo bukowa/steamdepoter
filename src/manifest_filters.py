@@ -47,7 +47,7 @@ _patterns_text: str = ""
 _fast_hide_single_exts: frozenset[str] = frozenset()
 # ``**/*.<literal>`` where literal contains ``.`` (e.g. ``tar.gz``) → basename endswith ``.<literal>``
 _fast_hide_compound_suffixes: frozenset[str] = frozenset()
-_complex_glob_patterns: List[str] = []
+_complex_glob_patterns: List[re.Pattern[str]] = []
 _regex_patterns: List[re.Pattern[str]] = []
 _last_persisted_text: str = ""
 _default_patterns_document_cache: Optional[str] = None
@@ -86,10 +86,11 @@ def _literal_for_pure_starstar_ext_glob(normalized_glob: str) -> Optional[str]:
     return lit
 
 
-def _parse_and_compile(text: str) -> Tuple[frozenset[str], frozenset[str], List[str], List[re.Pattern[str]]]:
+def _parse_and_compile(text: str) -> Tuple[frozenset[str], frozenset[str], List[re.Pattern[str]], List[re.Pattern[str]]]:
+    import fnmatch
     fast_single: set[str] = set()
     fast_compound: set[str] = set()
-    complex_globs: List[str] = []
+    complex_globs: List[re.Pattern[str]] = []
     regexes: List[re.Pattern[str]] = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -113,7 +114,12 @@ def _parse_and_compile(text: str) -> Tuple[frozenset[str], frozenset[str], List[
                 else:
                     fast_single.add(low)
             else:
-                complex_globs.append(pat)
+                if pat.endswith('/'):
+                    pat += '**'
+                try:
+                    complex_globs.append(re.compile(fnmatch.translate(pat)))
+                except re.error:
+                    continue
     return frozenset(fast_single), frozenset(fast_compound), complex_globs, regexes
 
 
@@ -210,13 +216,9 @@ def path_matches_hide_rules(relative_path: str) -> bool:
             if bl.endswith("." + suf):
                 return True
     if _complex_glob_patterns:
-        pp = PurePosixPath(norm)
         for pat in _complex_glob_patterns:
-            try:
-                if pp.match(pat):
-                    return True
-            except ValueError:
-                continue
+            if pat.match(norm):
+                return True
     for rx in _regex_patterns:
         if rx.search(norm):
             return True

@@ -215,7 +215,7 @@ class ManifestService(BaseService):
 
     def _add_file(self, manifest_id: str, f) -> None:
         """Add a single file row if it doesn't already exist."""
-        if is_directory_entry(getattr(f, "flags", None)):
+        if is_directory_entry(getattr(f, "flags", None)) or getattr(f, "sha", "") == "0000000000000000000000000000000000000000":
             return
         exists = self.session.query(ManifestFile).filter_by(
             manifest_id=manifest_id, name=f.name

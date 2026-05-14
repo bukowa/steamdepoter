@@ -28,10 +28,11 @@ from src.steamdb_tasks import DepotsParsingTask, ManifestsParsingTask
 from src import manifest_filters
 from src.settings import settings
 from src.steam_manifest_flags import DEPOT_FILE_FLAG_DIRECTORY, is_directory_entry
+from src.file_download_service import FileDownloadService, FILE_DL_NONE, FILE_DL_DOWNLOADED, FILE_DL_VERIFIED, FILE_DL_STALE
 
 
-# Table row: path, size_bytes, manifest_id, sha (empty string if missing)
-_FileTableRow = Tuple[str, int, str, str]
+# Table row: path, size_bytes, manifest_id, sha (empty string if missing), download_status
+_FileTableRow = Tuple[str, int, str, str, int]
 
 
 class _ManifestFileListLoader(QThread):
@@ -62,22 +63,24 @@ class _ManifestFileListLoader(QThread):
             session = Session()
             try:
                 nondir = (func.coalesce(ManifestFile.flags, 0).op("&")(DEPOT_FILE_FLAG_DIRECTORY)) == 0
+                valid_sha = ManifestFile.sha != "0000000000000000000000000000000000000000"
                 q = (
                     session.query(
                         ManifestFile.name,
                         ManifestFile.size,
                         ManifestFile.manifest_id,
                         ManifestFile.sha,
+                        ManifestFile.download_status,
                     )
-                    .filter(ManifestFile.manifest_id.in_(self._manifest_ids), nondir)
+                    .filter(ManifestFile.manifest_id.in_(self._manifest_ids), nondir, valid_sha)
                     .order_by(ManifestFile.name)
                 )
                 rows: List[_FileTableRow] = []
-                for name, size, mid, sha in q.yield_per(4000):
+                for name, size, mid, sha, dl_status in q.yield_per(4000):
                     if self.isInterruptionRequested():
                         return
                     sz = int(size) if size is not None else 0
-                    rows.append((name, sz, str(mid), (sha or "").strip()))
+                    rows.append((name, sz, str(mid), (sha or "").strip(), dl_status or 0))
                 self.loaded.emit(rows)
             finally:
                 session.close()
@@ -87,9 +90,9 @@ class _ManifestFileListLoader(QThread):
 
 
 class _ManifestFileTableModel(QAbstractTableModel):
-    """Lightweight read-only table: Path, Size (MB), Manifest, SHA."""
+    """Lightweight read-only table: Path, Size (MB), Manifest, SHA, Status."""
 
-    _HEADERS = ("Path", "Size (MB)", "Manifest", "SHA")
+    _HEADERS = ("Path", "Size (MB)", "Manifest", "SHA", "Status")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -109,7 +112,7 @@ class _ManifestFileTableModel(QAbstractTableModel):
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not (0 <= index.row() < len(self._rows)):
             return None
-        name, size_b, mid, sha = self._rows[index.row()]
+        name, size_b, mid, sha, dl_status = self._rows[index.row()]
         col = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
             if col == 0:
@@ -120,6 +123,15 @@ class _ManifestFileTableModel(QAbstractTableModel):
                 return mid
             if col == 3:
                 return sha
+            if col == 4:
+                if dl_status == FILE_DL_VERIFIED:
+                    return "✅ Verified"
+                elif dl_status == FILE_DL_DOWNLOADED:
+                    return "✔️ Downloaded"
+                elif dl_status == FILE_DL_STALE:
+                    return "⚠️ Stale"
+                else:
+                    return "⬜ Missing"
         if role == Qt.ItemDataRole.TextAlignmentRole and col == 1:
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return None
@@ -136,14 +148,16 @@ class _ManifestFileTableModel(QAbstractTableModel):
         reverse = order == Qt.SortOrder.DescendingOrder
 
         def key(row: _FileTableRow):
-            name, size_b, mid, sha = row
+            name, size_b, mid, sha, dl_status = row
             if column == 0:
                 return name.lower()
             if column == 1:
                 return size_b
             if column == 2:
                 return mid
-            return sha.lower()
+            if column == 3:
+                return sha.lower()
+            return dl_status
 
         self.layoutAboutToBeChanged.emit()
         self._rows.sort(key=key, reverse=reverse)
@@ -236,7 +250,27 @@ class LibraryTab(QWidget):
         file_pane_header = QHBoxLayout()
         file_pane_header.setContentsMargins(0, 0, 0, 0)
         file_pane_header.addWidget(self._file_pane_title)
+        
+        self._file_search_input = QLineEdit()
+        self._file_search_input.setPlaceholderText("Search files...")
+        self._file_search_input.setClearButtonEnabled(True)
+        self._file_search_input.setMinimumWidth(150)
+        self._file_search_input.setMaximumWidth(300)
+        
+        self._file_search_debounce = QTimer()
+        self._file_search_debounce.setSingleShot(True)
+        self._file_search_debounce.setInterval(200)
+        self._file_search_debounce.timeout.connect(lambda: self._apply_file_pane_filter(update_counts_in_status=True))
+        self._file_search_input.textChanged.connect(lambda: self._file_search_debounce.start())
+        
+        file_pane_header.addWidget(self._file_search_input)
         file_pane_header.addStretch()
+
+        self._btn_download_files = self._make_button("Download Files", self.on_download_files)
+        self._btn_verify_files = self._make_button("Verify Files", self.on_verify_files)
+        file_pane_header.addWidget(self._btn_download_files)
+        file_pane_header.addWidget(self._btn_verify_files)
+
         file_pane_header.addWidget(self._file_pane_options_btn)
 
         self._file_table_model = _ManifestFileTableModel(self)
@@ -249,15 +283,21 @@ class LibraryTab(QWidget):
         self._file_table_view.setShowGrid(False)
         self._file_table_view.verticalHeader().setVisible(False)
         self._file_table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._file_table_view.doubleClicked.connect(self._on_file_table_double_clicked)
         self._file_table_view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         hh = self._file_table_view.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(True)
         hh.setMinimumSectionSize(64)
+        
+        # Set initial decent widths so they aren't squished
+        self._file_table_view.setColumnWidth(0, 400)  # Path
+        self._file_table_view.setColumnWidth(1, 80)   # Size
+        self._file_table_view.setColumnWidth(2, 160)  # Manifest
+        self._file_table_view.setColumnWidth(3, 300)  # SHA
+        self._file_table_view.setColumnWidth(4, 120)  # Status
 
         ext_group = QGroupBox(
             "Hide patterns — Unix globs (pathlib), one per line; "
@@ -388,16 +428,24 @@ class LibraryTab(QWidget):
 
     def _apply_file_pane_filter(self, *, update_counts_in_status: bool = True) -> None:
         full = self._cached_file_rows
-        if manifest_filters.is_hide_filter_enabled():
-            visible = [r for r in full if not manifest_filters.should_hide_non_binary_path(r[0])]
-        else:
-            visible = list(full)
+        search_text = self._file_search_input.text().strip().lower()
+        
+        visible = []
+        hide_enabled = manifest_filters.is_hide_filter_enabled()
+        
+        for r in full:
+            if hide_enabled and manifest_filters.should_hide_non_binary_path(r[0]):
+                continue
+            if search_text and search_text not in r[0].lower():
+                continue
+            visible.append(r)
+            
         self._file_table_model.set_rows(visible)
         if not update_counts_in_status or not full:
             return
         n_full = len(full)
         n_vis = len(visible)
-        if manifest_filters.is_hide_filter_enabled() and n_vis != n_full:
+        if (manifest_filters.is_hide_filter_enabled() or search_text) and n_vis != n_full:
             self._file_pane_status.setText(f"{n_vis:,} file(s) shown · {n_full:,} total")
         else:
             self._file_pane_status.setText(f"{n_vis:,} file(s).")
@@ -429,6 +477,21 @@ class LibraryTab(QWidget):
             .all()
         )
         return sorted({str(r[0]) for r in rows})
+
+    def _on_file_table_double_clicked(self, index: QModelIndex) -> None:
+        """Handler for double clicking a file to select its manifest in the tree."""
+        if not index.isValid():
+            return
+        row_data = self._file_table_model._rows[index.row()]
+        manifest_id = row_data[2]  # 3rd element is manifest_id string
+        
+        # Block signals so we don't trigger a full reload of the file pane
+        self.tree_view.blockSignals(True)
+        try:
+            if self.tree_view.select_manifest(manifest_id):
+                self._file_pane_status.setText(f"Located manifest {manifest_id} in tree")
+        finally:
+            self.tree_view.blockSignals(False)
 
     def _on_tree_selection_changed(self) -> None:
         selected = self.tree_view.get_selected_items()
@@ -493,7 +556,7 @@ class LibraryTab(QWidget):
                 if is_directory_entry(f.flags):
                     continue
                 sz = int(f.size) if f.size is not None else 0
-                rows.append((f.name, sz, str(f.manifest_id), (f.sha or "").strip()))
+                rows.append((f.name, sz, str(f.manifest_id), (f.sha or "").strip(), getattr(f, "download_status", 0) or 0))
             self._file_pane_title.setText("Files (selection)")
             self._set_file_pane_cache(rows, update_counts_in_status=True)
             return
@@ -676,6 +739,97 @@ class LibraryTab(QWidget):
             worker.finished.connect(lambda _: self.data_changed.emit())
             
             self.console.add_command(worker, f"Fetch File List for {len(targets)} Manifest(s) (App {app_id})")
+
+    def on_download_files(self) -> None:
+        """Handler for 'Download Files' button click."""
+        if not self.console or not self.db:
+            return
+
+        rows = self._file_table_model._rows
+        selected_indexes = self._file_table_view.selectionModel().selectedRows()
+        if selected_indexes:
+            rows = [self._file_table_model._rows[idx.row()] for idx in selected_indexes]
+
+        if not rows:
+            QMessageBox.information(self, "No files", "No files visible or selected to download.")
+            return
+
+        from collections import defaultdict
+        manifest_files_map = defaultdict(list)
+        for row in rows:
+            name, size, mid, sha, status = row
+            manifest_files_map[mid].append(name)
+
+        new_session = self.db.get_session()
+        try:
+            for mid_str, file_names in manifest_files_map.items():
+                manifest = new_session.query(Manifest).filter(Manifest.manifest_id == mid_str).first()
+                if not manifest or not manifest.depot:
+                    continue
+
+                app_id = int(manifest.depot.app_id)
+                depot_id = int(manifest.depot.depot_id)
+                mid_int = int(mid_str)
+
+                worker = CommandWorker(
+                    FileDownloadService.execute_download_worker_task,
+                    db_path=str(self.db.db_path),
+                    app_id=app_id,
+                    depot_id=depot_id,
+                    manifest_id=mid_int,
+                    file_names=file_names
+                )
+                
+                # Setup cancellation correctly
+                def make_cancel_func(w):
+                    return lambda: w.stop()
+                
+                worker.on_cancel = make_cancel_func(worker)
+                worker.finished.connect(lambda _: self._on_tree_selection_changed())
+                
+                self.console.add_command(worker, f"Download {len(file_names)} files (Manifest {mid_int})")
+
+        except Exception as e:
+            show_error(self, e, "Failed to start download tasks")
+        finally:
+            new_session.close()
+
+    def on_verify_files(self) -> None:
+        """Handler for 'Verify Files' button click."""
+        if not self.console or not self.db:
+            return
+
+        rows = self._file_table_model._rows
+        selected_indexes = self._file_table_view.selectionModel().selectedRows()
+        if selected_indexes:
+            rows = [self._file_table_model._rows[idx.row()] for idx in selected_indexes]
+
+        if not rows:
+            QMessageBox.information(self, "No files", "No files visible or selected to verify.")
+            return
+
+        from collections import defaultdict
+        manifest_files_map = defaultdict(list)
+        for row in rows:
+            name, size, mid, sha, status = row
+            manifest_files_map[mid].append(name)
+
+        for mid_str, file_names in manifest_files_map.items():
+            mid_int = int(mid_str)
+            worker = CommandWorker(
+                FileDownloadService.execute_verify_worker_task,
+                db_path=str(self.db.db_path),
+                manifest_id=mid_int,
+                file_names=file_names
+            )
+            
+            def make_cancel_func(w):
+                return lambda: w.stop()
+            
+            worker.on_cancel = make_cancel_func(worker)
+            worker.finished.connect(lambda _: self._on_tree_selection_changed())
+            
+            self.console.add_command(worker, f"Verify {len(file_names)} files (Manifest {mid_int})")
 
 
 class BrowserTab(QWidget):

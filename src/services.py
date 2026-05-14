@@ -3,6 +3,8 @@ from typing import List, Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+import shutil
+from pathlib import Path
 
 from src.db import Game, Depot, Manifest, ManifestFile
 from src.db.validation import GameCreate, DepotCreate
@@ -85,11 +87,37 @@ class GameService(BaseService):
         return self._get_all(Game)
 
     def delete_game(self, game_id: int) -> None:
-        self._delete(Game, game_id)
+        self.delete_games([game_id])
 
     def delete_games(self, game_ids: List[int]) -> None:
-        """Batch delete games."""
-        self._delete_many(Game, game_ids)
+        """Batch delete games and cascade to depots, removing physical files."""
+        if not game_ids:
+            return
+            
+        games = self.session.query(Game).filter(Game.id.in_(game_ids)).all()
+        if not games:
+            return
+            
+        app_ids = [g.app_id for g in games]
+        
+        # 1. Cascade to depots
+        depots = self.session.query(Depot).filter(Depot.app_id.in_(app_ids)).all()
+        if depots:
+            DepotService(self.session).delete_depots([d.id for d in depots])
+            
+        try:
+            # 2. Delete games
+            self.session.query(Game).filter(Game.id.in_(game_ids)).delete(synchronize_session=False)
+            self.session.commit()
+            
+            # 3. Remove physical directories
+            for g in games:
+                path = Path("data/depotdownloader/downloads") / str(g.app_id)
+                shutil.rmtree(path, ignore_errors=True)
+                
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to batch delete games: {str(e)}")
 
     def update_game(self, app_id: str, props: dict) -> None:
         """Update game properties."""
@@ -122,11 +150,37 @@ class DepotService(BaseService):
         return self._get_all(Depot)
 
     def delete_depot(self, depot_id: int) -> None:
-        self._delete(Depot, depot_id)
+        self.delete_depots([depot_id])
 
     def delete_depots(self, depot_ids: List[int]) -> None:
-        """Batch delete depots."""
-        self._delete_many(Depot, depot_ids)
+        """Batch delete depots and cascade to manifests, removing physical files."""
+        if not depot_ids:
+            return
+            
+        depots = self.session.query(Depot).filter(Depot.id.in_(depot_ids)).all()
+        if not depots:
+            return
+            
+        depot_str_ids = [d.depot_id for d in depots]
+        
+        # 1. Cascade to manifests
+        manifests = self.session.query(Manifest).filter(Manifest.depot_id.in_(depot_str_ids)).all()
+        if manifests:
+            ManifestService(self.session).delete_manifests([m.id for m in manifests])
+            
+        try:
+            # 2. Delete depots
+            self.session.query(Depot).filter(Depot.id.in_(depot_ids)).delete(synchronize_session=False)
+            self.session.commit()
+            
+            # 3. Remove physical directories
+            for d in depots:
+                path = Path("data/depotdownloader/downloads") / str(d.app_id) / str(d.depot_id)
+                shutil.rmtree(path, ignore_errors=True)
+                
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to batch delete depots: {str(e)}")
 
     def update_depot(self, depot_id: str, props: dict) -> None:
         """Update depot os and language."""
@@ -181,9 +235,39 @@ class ManifestService(BaseService):
     def get_all_manifest_files(self) -> List[ManifestFile]:
         return self._get_all(ManifestFile)
 
+    def delete_manifest(self, manifest_id: int) -> None:
+        self.delete_manifests([manifest_id])
+
     def delete_manifests(self, manifest_ids: List[int]) -> None:
-        """Batch delete manifests."""
-        self._delete_many(Manifest, manifest_ids)
+        """Batch delete manifests and cascade to files, removing physical files."""
+        if not manifest_ids:
+            return
+        
+        # Get info to delete physical directories and cascade
+        manifests = self.session.query(Manifest).filter(Manifest.id.in_(manifest_ids)).all()
+        if not manifests:
+            return
+
+        manifest_str_ids = [m.manifest_id for m in manifests]
+        
+        try:
+            # 1. Bulk delete files
+            self.session.query(ManifestFile).filter(ManifestFile.manifest_id.in_(manifest_str_ids)).delete(synchronize_session=False)
+            
+            # 2. Bulk delete manifests
+            self.session.query(Manifest).filter(Manifest.id.in_(manifest_ids)).delete(synchronize_session=False)
+            
+            self.session.commit()
+            
+            # 3. Remove physical directories
+            for m in manifests:
+                if m.depot:
+                    path = Path("data/depotdownloader/downloads") / str(m.depot.app_id) / str(m.depot.depot_id) / str(m.manifest_id)
+                    shutil.rmtree(path, ignore_errors=True)
+                    
+        except SQLAlchemyError as e:
+            self.session.rollback()
+            raise DatabaseError(f"Failed to batch delete manifests: {str(e)}")
 
     def mark_files_parsed(self, manifest_id: str) -> None:
         """Mark a manifest's files as parsed."""

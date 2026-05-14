@@ -662,8 +662,9 @@ class LibraryTab(QWidget):
             return
 
         msg = "Delete " + " and ".join(msg_parts) + "?"
+        msg += "\n\nWARNING: This will also PERMANENTLY DELETE all downloaded files from your disk associated with these items!"
         if games:
-            msg += "\nWarning: Deleting a game will delete all its depots and manifests!"
+            msg += "\nDeleting a game will delete all its depots and manifests!"
 
         response = QMessageBox.question(
             self,

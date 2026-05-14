@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import hashlib
 import tempfile
 from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any, Tuple
@@ -49,10 +50,11 @@ class ManifestDataOutput(BinOutput):
 
 @dataclass(frozen=True)
 class DepotFileDownloadEntry:
-    """One depot file to fetch: POSIX path as in manifest + size for skip-existing checks."""
+    """One depot file: path + size; optional SHA-1 (hex) to skip re-downloads when size isn't enough."""
 
     relative_path: str
     size_bytes: int = 0
+    sha_hex: str = ""
 
 
 class DepotDownloader(Configurable):
@@ -196,6 +198,102 @@ class DepotDownloader(Configurable):
             sensitive_values.append(self.password)
         return self.runner.run(command, sensitive_values=sensitive_values or None, on_output=on_output)
 
+    # Strings aligned with SteamRE DepotDownloader ContentDownloader / GetDepotInfo console output.
+
+    @staticmethod
+    def _dd_manifest_line_signal(depot_id: int, manifest_id: int, line: str) -> Optional[Tuple[int, bool]]:
+        """
+        If *line* reports something decisive for this depot+manifest, return ``(status, depot_forbidden)``.
+        ``depot_forbidden`` is True only for the account-wide depot denial line.
+        """
+        if "RateLimitExceeded" in line:
+            return MANIFEST_STATUS_ERR_RATELIMIT, False
+        if re.search(rf"Depot\s+{depot_id}\s+is not available from this account", line):
+            return MANIFEST_STATUS_ERR_401, True
+        if re.search(
+            rf"Encountered\s+(401|403)\s+for\s+depot\s+manifest\s+{depot_id}\s+{manifest_id}\b",
+            line,
+        ):
+            return MANIFEST_STATUS_ERR_401, False
+        if re.search(rf"Encountered\s+404\s+for\s+depot\s+manifest\s+{depot_id}\s+{manifest_id}\b", line):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(
+            rf"Unable\s+to\s+download\s+manifest\s+{manifest_id}\s+for\s+depot\s+{depot_id}\b",
+            line,
+        ):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(rf"No\s+valid\s+depot\s+key\s+for\s+{depot_id}\b", line):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(rf"Depot\s+{depot_id}\s+missing\s+public\s+subsection", line):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(
+            rf"Encountered\s+error\s+downloading\s+depot\s+manifest\s+{depot_id}\s+{manifest_id}\b",
+            line,
+        ):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(
+            rf"Encountered\s+error\s+downloading\s+manifest\s+for\s+depot\s+{depot_id}\s+{manifest_id}\b",
+            line,
+        ):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(
+            rf"Connection\s+timeout\s+downloading\s+depot\s+manifest\s+{depot_id}\s+{manifest_id}\b",
+            line,
+        ):
+            return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(rf"Already\s+have\s+manifest\s+{manifest_id}\s+for\s+depot\s+{depot_id}\b", line):
+            return MANIFEST_STATUS_SUCCESS, False
+        if re.search(r"Got\s+manifest\s+request\s+code", line, re.I) and re.search(rf"\b{manifest_id}\b", line):
+            return MANIFEST_STATUS_SUCCESS, False
+        if "Download failed" in line or "Error downloading" in line:
+            if str(manifest_id) in line and str(depot_id) in line:
+                return MANIFEST_STATUS_ERR_UNKNOWN, False
+        if re.search(r"Encountered\s+401\b", line) and str(manifest_id) in line and str(depot_id) in line:
+            return MANIFEST_STATUS_ERR_401, False
+        return None
+
+    @staticmethod
+    def _scrape_manifest_stdout(
+        depot_id: int, manifest_id: int, stdout: str, cmd_success: bool
+    ) -> Tuple[int, bool, bool]:
+        """
+        Classify combined stdout for one depot+manifest job.
+        Returns ``(status, depot_forbidden, ratelimited)``.
+        """
+        ratelimit = False
+        depot_forbidden = False
+        last_success: Optional[int] = None
+        last_problem: Optional[int] = None
+
+        for raw in stdout.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            sig = DepotDownloader._dd_manifest_line_signal(depot_id, manifest_id, line)
+            if sig is None:
+                continue
+            st, df = sig
+            if df:
+                depot_forbidden = True
+            if st == MANIFEST_STATUS_ERR_RATELIMIT:
+                ratelimit = True
+            if st == MANIFEST_STATUS_SUCCESS:
+                last_success = st
+            else:
+                last_problem = st
+
+        if ratelimit:
+            return MANIFEST_STATUS_ERR_RATELIMIT, False, True
+        if depot_forbidden:
+            return MANIFEST_STATUS_ERR_401, True, False
+        if last_problem is not None:
+            return last_problem, False, False
+        if last_success is not None:
+            return last_success, False, False
+        if cmd_success:
+            return MANIFEST_STATUS_SUCCESS, False, False
+        return MANIFEST_STATUS_ERR_UNKNOWN, False, False
+
     def _interpret_manifest_fetch_output(
         self, depot_id: int, manifest_id: int, output: BinOutput
     ) -> Tuple[int, bool, bool]:
@@ -203,29 +301,8 @@ class DepotDownloader(Configurable):
         Classify DepotDownloader stdout for a single manifest fetch.
 
         Returns ``(status, depot_forbidden, rate_limited)``.
-        *depot_forbidden* is True when this account cannot use the depot at all
-        (``Depot {id} is not available from this account``).
-
-        Order of checks matches :meth:`get_manifest_data` (Steam messages rarely overlap).
         """
-        stdout = output.stdout
-        if "RateLimitExceeded" in stdout:
-            return MANIFEST_STATUS_ERR_RATELIMIT, False, True
-        if re.search(rf"Already have manifest {manifest_id}", stdout) or re.search(
-            rf"Got manifest request code.*manifest {manifest_id}", stdout
-        ):
-            return MANIFEST_STATUS_SUCCESS, False, False
-        if re.search(rf"Encountered 401.*{manifest_id}", stdout):
-            return MANIFEST_STATUS_ERR_401, False, False
-        if re.search(rf"Depot {depot_id} is not available from this account", stdout):
-            return MANIFEST_STATUS_ERR_401, True, False
-        if re.search(rf"Unable to download manifest {manifest_id}", stdout):
-            if "401" in stdout:
-                return MANIFEST_STATUS_ERR_401, False, False
-            return MANIFEST_STATUS_ERR_UNKNOWN, False, False
-        if output.success:
-            return MANIFEST_STATUS_SUCCESS, False, False
-        return MANIFEST_STATUS_ERR_UNKNOWN, False, False
+        return self._scrape_manifest_stdout(depot_id, manifest_id, output.stdout, output.success)
 
     def _finalize_manifest_status_from_disk(
         self,
@@ -429,6 +506,7 @@ class DepotDownloader(Configurable):
             combined_stdout += output.stdout
 
             lines = output.stdout.splitlines()
+            current_depot_id: Optional[int] = None
             current_manifest_id: Optional[int] = None
             for line in lines:
                 line = line.strip()
@@ -439,71 +517,65 @@ class DepotDownloader(Configurable):
                     r"Starting download for App: (\d+), Depot: (\d+), Manifest: (\d+)", line
                 )
                 if start_match:
+                    current_depot_id = int(start_match.group(2))
                     current_manifest_id = int(start_match.group(3))
                     continue
 
-                if current_manifest_id is None:
+                if current_manifest_id is None or current_depot_id is None:
                     continue
 
-                status = MANIFEST_STATUS_ERR_UNKNOWN
+                sig = self._dd_manifest_line_signal(current_depot_id, current_manifest_id, line)
+                if sig is None:
+                    continue
+                status, depot_forbidden = sig
 
-                if "RateLimitExceeded" in line:
-                    status = MANIFEST_STATUS_ERR_RATELIMIT
-                elif re.search(r"Depot \d+ is not available from this account", line):
-                    status = MANIFEST_STATUS_ERR_401
-                elif re.search(rf"Already have manifest {current_manifest_id}", line):
-                    status = MANIFEST_STATUS_SUCCESS
-                elif re.search(rf"Got manifest request code.*manifest {current_manifest_id}", line):
-                    status = MANIFEST_STATUS_SUCCESS
-                elif "Download failed" in line or "Error downloading" in line:
-                    status = MANIFEST_STATUS_ERR_UNKNOWN
-                elif output.success:
-                    status = MANIFEST_STATUS_SUCCESS
+                if depot_forbidden:
+                    for mid in batch_after_preflight.get(current_depot_id, ()):
+                        statuses[mid] = MANIFEST_STATUS_ERR_401
+                        if on_manifest_complete:
+                            on_manifest_complete(mid, MANIFEST_STATUS_ERR_401, None)
+                    continue
 
-                if status != MANIFEST_STATUS_ERR_UNKNOWN:
-                    statuses[current_manifest_id] = status
+                statuses[current_manifest_id] = status
 
-                    parsed_manifest: Optional[ParsedManifest] = None
-                    depot_for_mid: Optional[int] = None
-                    for d_id, m_ids in batch_after_preflight.items():
-                        if current_manifest_id in m_ids:
-                            depot_for_mid = d_id
-                            break
-                    if depot_for_mid is not None:
-                        manifest_file = self.get_manifest_file_path(
-                            app_id, depot_for_mid, current_manifest_id
-                        )
-                        if manifest_file.exists():
-                            parsed_manifest = self._parse_manifest_file(manifest_file)
-                            if parsed_manifest:
-                                manifests[current_manifest_id] = parsed_manifest
+                parsed_manifest: Optional[ParsedManifest] = None
+                manifest_file = self.get_manifest_file_path(
+                    app_id, current_depot_id, current_manifest_id
+                )
+                if manifest_file.exists():
+                    parsed_manifest = self._parse_manifest_file(manifest_file)
+                    if parsed_manifest:
+                        manifests[current_manifest_id] = parsed_manifest
 
-                    if on_manifest_complete:
-                        on_manifest_complete(current_manifest_id, status, parsed_manifest)
+                if on_manifest_complete:
+                    on_manifest_complete(current_manifest_id, status, parsed_manifest)
 
             for depot_id, manifest_ids in batch_after_preflight.items():
                 for manifest_id in manifest_ids:
                     if manifest_id not in statuses:
+                        st, _df, _rl = self._scrape_manifest_stdout(
+                            depot_id, manifest_id, output.stdout, output.success
+                        )
                         manifest_file = self.get_manifest_file_path(app_id, depot_id, manifest_id)
                         if manifest_file.exists():
                             parsed_manifest = self._parse_manifest_file(manifest_file)
                             if parsed_manifest:
-                                statuses[manifest_id] = MANIFEST_STATUS_SUCCESS
-                                manifests[manifest_id] = parsed_manifest
+                                final_st, parsed = self._finalize_manifest_status_from_disk(
+                                    app_id, depot_id, manifest_id, st
+                                )
+                                statuses[manifest_id] = final_st
+                                if parsed:
+                                    manifests[manifest_id] = parsed
                                 if on_manifest_complete:
-                                    on_manifest_complete(
-                                        manifest_id, MANIFEST_STATUS_SUCCESS, parsed_manifest
-                                    )
+                                    on_manifest_complete(manifest_id, final_st, parsed)
                             else:
-                                statuses[manifest_id] = MANIFEST_STATUS_ERR_UNKNOWN
+                                statuses[manifest_id] = st
                                 if on_manifest_complete:
-                                    on_manifest_complete(
-                                        manifest_id, MANIFEST_STATUS_ERR_UNKNOWN, None
-                                    )
+                                    on_manifest_complete(manifest_id, st, None)
                         else:
-                            statuses[manifest_id] = MANIFEST_STATUS_ERR_UNKNOWN
+                            statuses[manifest_id] = st
                             if on_manifest_complete:
-                                on_manifest_complete(manifest_id, MANIFEST_STATUS_ERR_UNKNOWN, None)
+                                on_manifest_complete(manifest_id, st, None)
 
             if any(s == MANIFEST_STATUS_ERR_RATELIMIT for s in statuses.values()):
                 raise RateLimitError("Steam rate limit exceeded. Please wait before trying again.")
@@ -534,13 +606,35 @@ class DepotDownloader(Configurable):
 
     @staticmethod
     def _file_already_matches_expected(path: Path, expected_size: int) -> bool:
-        """Whether we can skip downloading *path* (exists and size matches manifest when known)."""
+        """Whether on-disk size alone says the file matches the manifest row."""
         if not path.is_file():
             return False
         got = path.stat().st_size
         if expected_size > 0:
             return got == expected_size
         return got == 0
+
+    @staticmethod
+    def _sha1_file_hex(path: Path) -> str:
+        h = hashlib.sha1()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def _file_skip_if_unchanged(path: Path, expected_size: int, sha_hex: str) -> bool:
+        """Skip re-download if SHA matches when given; else fall back to size-only."""
+        if not path.is_file():
+            return False
+        want = (sha_hex or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", want):
+            try:
+                if DepotDownloader._sha1_file_hex(path) != want:
+                    return False
+            except OSError:
+                return False
+        return DepotDownloader._file_already_matches_expected(path, expected_size)
 
     def filter_entries_missing_on_disk(
         self,
@@ -549,14 +643,14 @@ class DepotDownloader(Configurable):
         *,
         skip_existing: bool,
     ) -> List[DepotFileDownloadEntry]:
-        """Drop entries that already sit on disk with the expected size (see :meth:`download_depot_files`)."""
+        """Drop entries that already match on disk (SHA-1 if provided, else size)."""
         if not skip_existing:
             return list(entries)
         root = Path(output_dir).resolve()
         out: List[DepotFileDownloadEntry] = []
         for e in entries:
             p = self.content_path_under_dir(root, e.relative_path)
-            if self._file_already_matches_expected(p, e.size_bytes):
+            if self._file_skip_if_unchanged(p, e.size_bytes, e.sha_hex):
                 continue
             out.append(e)
         return out
@@ -580,9 +674,9 @@ class DepotDownloader(Configurable):
         The list file is one relative path per line (``\\`` normalized to ``/``); optional
         ``regex:`` lines are supported by DepotDownloader itself — we only emit plain paths here.
 
-        When *skip_existing* is True, paths whose on-disk file already matches *size_bytes*
-        from the manifest are omitted (large selections should pass real sizes from the DB).
-        Pass ``validate_downloaded=True`` to add ``-validate`` (checksum verification).
+        When *skip_existing* is True, skip paths that already match: if ``sha_hex`` is a 40-char
+        hex SHA-1 from the manifest DB, it must match the file on disk; otherwise *size_bytes*
+        is used. Pass ``validate_downloaded=True`` to add DepotDownloader's ``-validate``.
         """
         if is_cancelled and is_cancelled():
             return BinOutput(command=[str(self.binary_path)], stdout="", stderr="Cancelled before start.\n", exit_code=1)
